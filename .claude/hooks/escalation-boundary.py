@@ -20,7 +20,22 @@ import re
 import sys
 from pathlib import Path
 
-WORKSPACE_ROOT = Path("/home/user/LinuxAgenticClaudeOS").resolve()
+def _require_env(name: str) -> Path:
+    value = os.environ.get(name)
+    if not value:
+        sys.stderr.write(
+            f"BLOCKED by §5 escalation boundary: {name} is unset.\n"
+            "The control plane refuses to run without an explicit workspace "
+            "root — silent misconfiguration is the failure mode this hook "
+            "exists to prevent. Set it in .claude/settings.json (env block) "
+            "or export it before launching Claude Code.\n"
+        )
+        sys.exit(2)
+    return Path(value).resolve()
+
+
+WORKSPACE_ROOT = _require_env("PRAXIS_WORKSPACE_ROOT")
+MEMORY_ROOT = _require_env("PRAXIS_MEMORY_ROOT")
 CONTROL_PLANE = WORKSPACE_ROOT / ".claude"
 ALLOWED_DOMAINS: frozenset[str] = frozenset()
 
