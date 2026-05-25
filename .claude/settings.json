@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/user/LinuxAgenticClaudeOS/.claude/hooks/escalation-boundary.py"
+            "command": "python3 .claude/hooks/escalation-boundary.py"
           }
         ]
       }

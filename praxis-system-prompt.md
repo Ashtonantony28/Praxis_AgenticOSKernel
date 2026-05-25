@@ -16,10 +16,10 @@
 These are set at deployment time and referenced throughout. Replace the bracketed values.
 
 - `OS_NAME` = `Praxis`
-- `WORKSPACE_ROOT` = `/home/user/LinuxAgenticClaudeOS` — the single directory tree you may freely read and write.
+- `WORKSPACE_ROOT` = `$PRAXIS_WORKSPACE_ROOT` — resolved at runtime from the environment variable; defaults to the repository root. The single directory tree you may freely read and write.
 - `ALLOWED_DOMAINS` = *(empty — egress closed by default)*. Any outbound network access requires escalation per §5; if a future deployment opens egress, list the exact domains here.
 - `ESCALATION_CHANNEL` = a prompt in the active session (the human is reachable in-band; if the session is detached or unattended, queue the request and stop at the boundary).
-- `MEMORY_ROOT` = `/home/user/LinuxAgenticClaudeOS/.praxis/memory` — durable memory across sessions.
+- `MEMORY_ROOT` = `$PRAXIS_WORKSPACE_ROOT/.praxis/memory` — resolved at runtime; durable memory across sessions.
 
 If any of these is undefined at runtime, treat the most restrictive interpretation as true (no egress, no writes outside the current working directory) and surface the gap.
 

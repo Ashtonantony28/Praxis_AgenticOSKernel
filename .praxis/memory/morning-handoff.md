@@ -1,210 +1,139 @@
-# Morning handoff — Phase 0: build the minimal Python orchestrator
+# Morning handoff — Phase 0 complete, ready for Phase A
 
-**Status:** Phase A halted (correctly — premise mismatch). Reconciliation
-confirmed: **Phase A is actually Phase 0**. Build the orchestrator first,
-then a runtime abstraction has something to wrap.
+**Date:** 2026-05-25
+**Status:** Phase 0 **done**. Minimal Python orchestrator built, 43 tests
+green, §5 hook enforced. Phase A (runtime abstraction) is next.
 
 ---
 
 ## 1. Exact repo state
 
 **Repo:** `Ashtonantony28/Praxis_AgenticOSKernel`
-**Working branch:** `claude/blissful-franklin-VIMiH` (this branch)
-**Local path:** `/home/user/Praxis_AgenticOSKernel`
-
-Files (identical on `main`, `claude/blissful-franklin-VIMiH`, and
-`claude/plan-execute-mode-switch-zCz38`):
+**Branch:** `claude/blissful-franklin-VIMiH`
+**Main branch:** `claude/plan-execute-mode-switch-zCz38`
 
 ```
-praxis-system-prompt.md                     # the spec (§0–§11)
-.claude/agents/builder.md
-.claude/agents/planner.md
-.claude/agents/scout.md
-.claude/agents/scribe.md
-.claude/agents/verifier.md
-.claude/hooks/escalation-boundary.py        # the only Python, PreToolUse hook
-.claude/settings.json                       # wires the hook
-.praxis/memory/.gitkeep
-.praxis/memory/morning-handoff.md           # this file (new on this branch)
+praxis-system-prompt.md              # the spec (§0–§11), WORKSPACE_ROOT now env-var based
+CLAUDE.md                            # project conventions — read this first
+pyproject.toml                       # deps: anthropic, pytest
+
+praxis/                              # the orchestrator (524 lines total)
+  __init__.py                        #   package marker, version
+  __main__.py                        #   `python -m praxis` entrypoint
+  config.py                          #   Config.from_env() — workspace/memory/hook from env
+  subagents.py                       #   parse .claude/agents/*.md → SubagentDef
+  hooks.py                           #   run_pretool_hook() — subprocess to escalation-boundary.py
+  tools.py                           #   7 tool schemas + implementations
+  orchestrator.py                    #   Orchestrator class — agent loop on anthropic messages API
+
+tests/                               # 43 tests, all pass, all mocked (592 lines total)
+  conftest.py                        #   FakeClient, FakeResponse, workspace fixtures
+  test_config.py                     #   6 tests — env resolution, restrictive fallback
+  test_subagents.py                  #   8 tests — YAML parsing, model mapping, all 5 agents
+  test_hooks.py                      #   9 tests — allow/block for writes, network, control plane
+  test_tools.py                      #   13 tests — Bash, Read, Edit, Write, Grep, Glob, schemas
+  test_orchestrator.py               #   7 tests — init, end-to-end, hook block, subagent dispatch
+
+.claude/agents/                      # 5 subagent definitions (unchanged)
+  builder.md                         #   sonnet — executes approved plans
+  planner.md                         #   sonnet — produces ordered plans
+  scout.md                           #   haiku — read-only investigation
+  scribe.md                          #   haiku — maintains memory
+  verifier.md                        #   sonnet — checks builder output
+
+.claude/hooks/escalation-boundary.py # §5 hook (unchanged)
+.claude/settings.json                # hook wiring — now uses relative path
+
+.praxis/memory/
+  morning-handoff.md                 # this file
+  phase0-plan.md                     # Phase 0 design plan (archived)
+  .gitkeep
+
 .gitignore
 ```
 
-Other branches (`fix-pre-tool-use-hook-tRzjd`, `jolly-clarke-Gpap8`,
-`loving-mendel-7qxgd`, `remove-escalation-hook-kfZ5Q`,
-`review-morning-handoff-JVdUE`, `wizardly-sagan-fSJLM`,
-`zealous-turing-WkWhs`) are empty — no commits with content.
+---
 
-**No Python orchestrator. No test suite. No `runtime/` package. No
-`CLAUDE.md`.**
+## 2. What Phase 0 built
+
+A minimal Python orchestrator that makes the markdown spec executable:
+
+1. **Agent loop** (`orchestrator.py`): Uses `anthropic` SDK
+   `client.messages.create()` with tool use. Simple while loop — send
+   message, process tool_use blocks, send results back, repeat until
+   end_turn. Safety cap at 50 iterations.
+
+2. **Tool dispatch** (`tools.py`): 7 tools registered — Bash, Read, Edit,
+   Write, Grep, Glob, Agent. Each has a JSON schema for the API and a
+   Python implementation. Agent is dispatched by the orchestrator (not
+   tools.py).
+
+3. **§5 hook enforcement** (`hooks.py`): Every tool call — in both
+   orchestrator and subagent sessions — passes through
+   `run_pretool_hook()` before execution. Subprocess call to
+   `escalation-boundary.py`, JSON on stdin, exit 0 = allow, exit 2 =
+   block. Blocked calls return an error string to the model.
+
+4. **Subagent dispatch** (`subagents.py` + `orchestrator.py`): When the
+   model calls `Agent(name="scout", prompt="...")`, the orchestrator
+   looks up the SubagentDef, creates a new agent loop with the
+   subagent's system prompt, restricted tools, and model. The subagent
+   inherits the §5 hook unconditionally.
+
+5. **Config** (`config.py`): Reads `PRAXIS_WORKSPACE_ROOT` and
+   `PRAXIS_MEMORY_ROOT` from env vars. Restrictive fallback per §0: cwd
+   if unset. Hook path derived as `workspace_root/.claude/hooks/escalation-boundary.py`.
+
+### Path fixes applied
+- `praxis-system-prompt.md` §0: `WORKSPACE_ROOT` and `MEMORY_ROOT` now
+  reference `$PRAXIS_WORKSPACE_ROOT` instead of a stale hardcoded path.
+- `.claude/settings.json`: hook command changed from absolute path to
+  `python3 .claude/hooks/escalation-boundary.py` (portable across clones).
+
+### What was deliberately left out
+- `io.py` — no session transport needed yet
+- `ExitPlanMode` — no plan/execute state machine yet
+- `WebFetch` — wired in the hook (blocked) but not in tool schemas
+- Runtime abstraction — that's Phase A
 
 ---
 
-## 2. Correct WORKSPACE_ROOT
+## 3. How to verify
 
-`praxis-system-prompt.md` §0 currently says:
-
-```
-WORKSPACE_ROOT = /home/user/LinuxAgenticClaudeOS
-MEMORY_ROOT    = /home/user/LinuxAgenticClaudeOS/.praxis/memory
-```
-
-`.claude/settings.json` also points its hook command at
-`/home/user/LinuxAgenticClaudeOS/.claude/hooks/escalation-boundary.py`.
-
-**Reality:** the repo lives at `/home/user/Praxis_AgenticOSKernel`. The
-`LinuxAgenticClaudeOS` path is stale from an earlier rename and does not
-exist on this machine. Either path needs to be made authoritative.
-
-Recommended fix as part of Phase 0:
-
-```
-WORKSPACE_ROOT = /home/user/Praxis_AgenticOSKernel
-MEMORY_ROOT    = /home/user/Praxis_AgenticOSKernel/.praxis/memory
+```bash
+export PRAXIS_WORKSPACE_ROOT=$(pwd)
+python -m pytest tests/ -v          # 43 tests, all should pass
+python -c "from praxis.orchestrator import Orchestrator"  # import check
 ```
 
-…and update `.claude/settings.json` to reference the in-repo hook with a
-repo-relative path (or `${CLAUDE_PROJECT_DIR}`) so it works in any
-clone/container — the hardcoded absolute path is currently dead in this
-container.
+No `ANTHROPIC_API_KEY` needed — all tests use FakeClient.
 
 ---
 
-## 3. What Phase 0 needs to build
+## 4. What Phase A should do
 
-**Goal:** the smallest possible Python program that, when run, *is*
-Praxis — i.e., the markdown spec (`praxis-system-prompt.md`) plus the
-subagent prompts in `.claude/agents/` actually drive a Claude Agent SDK
-session, with the §5 hook enforced. Once this exists, Phase A (runtime
-abstraction) becomes a real refactor with real behavior to preserve.
+**Goal:** Wrap the Phase 0 orchestrator in a `Runtime` abstraction so
+that different backends (local subprocess, hosted API, etc.) can be
+swapped without changing the orchestrator logic.
 
-### 3.1 Minimum components
+The orchestrator at `praxis/orchestrator.py` is the working baseline.
+Phase A should:
 
-```
-praxis/
-  __init__.py
-  __main__.py            # `python -m praxis` entrypoint
-  orchestrator.py        # builds & runs the top-level Agent SDK session
-                         #   - loads praxis-system-prompt.md as system prompt
-                         #   - registers tools (Bash, Read, Edit, Write, Grep,
-                         #     Glob, Agent, ExitPlanMode, etc. — whatever the
-                         #     spec actually needs)
-                         #   - installs the PreToolUse hook
-                         #   - runs the agent loop until completion
-  subagents.py           # loads .claude/agents/*.md, exposes them as a
-                         # spawn_subagent(name, prompt) primitive that the
-                         # orchestrator's Agent tool dispatches to
-  hooks.py               # thin wrapper that invokes
-                         #   .claude/hooks/escalation-boundary.py
-                         # as the PreToolUse hook (subprocess; respects
-                         # stdin/stdout JSON protocol it already uses)
-  config.py              # WORKSPACE_ROOT, MEMORY_ROOT, ALLOWED_DOMAINS
-                         # resolved from env / settings.json with the
-                         # "most restrictive interpretation" fallback
-                         # from §0
-  io.py                  # stdin/stdout JSON line protocol for sessions
-                         # (or whatever transport you want — keep it small)
-
-tests/
-  test_config.py         # restrictive-fallback semantics
-  test_subagents.py      # markdown agent loader: name, description, tools
-  test_hooks.py          # PreToolUse hook invocation, deny/allow/rewrite
-  test_orchestrator.py   # end-to-end with a stubbed SDK transport:
-                         # - boots, loads system prompt, registers tools
-                         # - subagent spawn is dispatched correctly
-                         # - hook denial blocks the offending tool call
-                         # - in-workspace edit succeeds
-  conftest.py            # fakes/fixtures: FakeAgentSDK that records calls
-
-pyproject.toml           # claude-agent-sdk, pytest, ruff
-README.md                # one screen: how to run + how to test
-```
-
-Keep it under ~500 lines of orchestrator code. The point is to make the
-markdown spec executable, not to add features.
-
-### 3.2 Tool list (what the orchestrator needs to register with the SDK)
-
-From `praxis-system-prompt.md` and the subagent files, the minimum tool
-surface is:
-
-- `Bash`, `Read`, `Edit`, `Write` — workspace mutation
-- `Grep`, `Glob` — workspace search
-- `Agent` — dispatches to the subagents declared in `.claude/agents/*.md`
-- `ExitPlanMode` — §4.5 plan/execute switch
-- `WebFetch` *(optional, gated by ALLOWED_DOMAINS — currently empty,
-  so this is wired but always denied by §5 hook)*
-
-No MCP tools in Phase 0 — add later if needed.
-
-### 3.3 §5 hook integration (do not change behavior)
-
-`.claude/hooks/escalation-boundary.py` already implements the §5 boundary
-check via the standard Claude Code PreToolUse JSON protocol (read JSON
-from stdin, exit 0 / nonzero, emit decision JSON on stdout). The
-orchestrator must call it **byte-for-byte the same way** Claude Code
-does:
-
-- subprocess with the hook script as `argv[0]`
-- send the standard `{tool_name, tool_input, ...}` JSON on stdin
-- honor `permissionDecision` and `permissionDecisionReason` from stdout
-
-A test must cover: `curl https://example.com` → blocked (egress closed);
-edit inside `WORKSPACE_ROOT` → allowed.
-
-### 3.4 Subagent loader contract
-
-Each `.claude/agents/*.md` has YAML frontmatter (name, description,
-tools, model). The loader parses the frontmatter, exposes
-`spawn_subagent(name, prompt, *, isolation=None)` that runs a child
-Agent SDK session with:
-
-- system prompt = the file's markdown body
-- tools = the frontmatter `tools` list (restricted from orchestrator's)
-- model = the frontmatter `model` (Haiku for scout, etc.)
-- inherits §5 hook unconditionally
-
-This is the spawn primitive the Phase A `Runtime.spawn_subagent` will
-later wrap.
-
-### 3.5 Test suite target
-
-The Phase A task referenced "62 cases" — that number was aspirational,
-not from this repo. A realistic Phase 0 test count is ~25–40 covering:
-
-- config resolution + restrictive fallback (4–6)
-- subagent markdown parsing edge cases (6–8)
-- hook subprocess protocol incl. deny/allow/rewrite (6–8)
-- orchestrator boot + tool registration with a FakeAgentSDK (4–6)
-- subagent dispatch routing (3–5)
-- end-to-end happy path + §5 boundary path (2–4)
-
-Use `pytest`. Stub the SDK; don't burn real API calls in CI.
-
-### 3.6 Out of scope for Phase 0 (do not let it expand)
-
-- The Runtime abstraction itself — that's Phase A, only meaningful once
-  the orchestrator exists.
-- OAuth / API key plumbing — Phase B.
-- Memory management beyond reading/writing files under `MEMORY_ROOT`.
-- Anything that changes the §5 hook's behavior.
-- Renaming Praxis or touching the spec's content (only fix the stale
-  `WORKSPACE_ROOT` path).
+1. Extract an abstract `Runtime` interface from the concrete
+   `Orchestrator` class — the agent loop, tool dispatch, and hook
+   enforcement become capabilities the Runtime provides.
+2. Keep the existing 43 tests green throughout. Add tests for the new
+   abstraction layer.
+3. Add `ExitPlanMode` tool and plan/execute state tracking (§4.5).
+4. Do not touch the §5 hook behavior.
+5. Do not add OAuth, API key plumbing, or MCP — those are later phases.
 
 ---
 
-## 4. Recommended next-session prompt
+## 5. Recommended next-session prompt
 
-> Build Phase 0: the minimal Python orchestrator described in
-> `.praxis/memory/morning-handoff.md` §3. Plan → Build → Verify → Scribe.
-> Fix the stale `WORKSPACE_ROOT` to `/home/user/Praxis_AgenticOSKernel`
-> in `praxis-system-prompt.md` §0 and in `.claude/settings.json`'s hook
-> path. Keep it ≤500 lines orchestrator + ≤300 lines tests. Do not start
-> Phase A (runtime abstraction) until Phase 0 is green.
-
----
-
-## 5. What this session changed
-
-- `.praxis/memory/morning-handoff.md` — this file (created).
-
-Nothing else. No code, no spec edits, no settings changes.
+> Begin Phase A: wrap the Phase 0 orchestrator in a Runtime abstraction.
+> Read `CLAUDE.md` and `.praxis/memory/morning-handoff.md` for current
+> state. The orchestrator at `praxis/orchestrator.py` is the baseline —
+> 43 tests green. Use the full pipeline: Scout → Plan → Build → Verify →
+> Scribe. Do not expand scope beyond the Runtime abstraction.

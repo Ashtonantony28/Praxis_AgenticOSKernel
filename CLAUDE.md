@@ -1,0 +1,45 @@
+# Praxis — Project Conventions
+
+## What is this
+
+Praxis is a minimal Python orchestrator for an agentic OS built on the Claude API. The markdown spec (`praxis-system-prompt.md`) defines the system; the orchestrator makes it executable.
+
+## Repository layout
+
+```
+praxis-system-prompt.md          # The spec (§0–§11)
+praxis/                          # Python orchestrator package
+  orchestrator.py                # Agent loop: messages API → tool dispatch → hook
+  config.py                      # WORKSPACE_ROOT, MEMORY_ROOT from env vars
+  subagents.py                   # Parses .claude/agents/*.md into SubagentDef
+  hooks.py                       # Runs escalation-boundary.py as PreToolUse check
+  tools.py                       # Tool schemas + implementations (Bash, Read, Edit, Write, Grep, Glob, Agent)
+  __main__.py                    # python -m praxis entrypoint
+.claude/agents/                  # Subagent definitions (builder, planner, scout, scribe, verifier)
+.claude/hooks/escalation-boundary.py  # §5 hook — blocks out-of-workspace writes, network egress
+.claude/settings.json            # Claude Code hook wiring
+tests/                           # pytest suite (43 tests, all mocked — no real API calls)
+.praxis/memory/                  # Durable memory across sessions
+```
+
+## Running
+
+```bash
+# Set workspace root (defaults to cwd if unset)
+export PRAXIS_WORKSPACE_ROOT=/path/to/repo
+export PRAXIS_MEMORY_ROOT=$PRAXIS_WORKSPACE_ROOT/.praxis/memory
+
+# Run orchestrator (requires ANTHROPIC_API_KEY)
+python -m praxis "your message"
+
+# Run tests
+python -m pytest tests/ -v
+```
+
+## Key conventions
+
+- **§5 hook is sacred.** Every tool call passes through `escalation-boundary.py` — in both orchestrator and subagent sessions. Never bypass it.
+- **Subagent definitions live in `.claude/agents/*.md`** with YAML frontmatter (name, description, tools, model). The orchestrator loads these at startup.
+- **No real API calls in tests.** All tests use FakeClient from `tests/conftest.py`.
+- **Config from env vars.** `PRAXIS_WORKSPACE_ROOT` and `PRAXIS_MEMORY_ROOT` — restrictive fallback per §0 if unset.
+- **Model mapping:** `haiku` → `claude-haiku-4-5-20251001`, `sonnet` → `claude-sonnet-4-6`, `opus` → `claude-opus-4-6`.
