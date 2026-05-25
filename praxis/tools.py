@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
+
+
+def _subprocess_env(config: Config) -> dict[str, str]:
+    """Build explicit env for subprocess calls.
+
+    Ensures auth tokens and workspace config propagate to child processes.
+    Mirrors the pattern in hooks.py.
+    """
+    env = {**os.environ}
+    env["PRAXIS_WORKSPACE_ROOT"] = str(config.workspace_root)
+    env["PRAXIS_MEMORY_ROOT"] = str(config.memory_root)
+    return env
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip auth tokens from subprocess output (§5.8 secret filtering)."""
+    for var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        val = os.environ.get(var)
+        if val and val in text:
+            text = text.replace(val, "[REDACTED]")
+    return text
 
 # ---------- JSON schemas for the Anthropic API ----------
 
@@ -117,6 +139,7 @@ def execute_bash(args: dict[str, Any], config: Config) -> str:
             text=True,
             timeout=timeout,
             cwd=str(config.workspace_root),
+            env=_subprocess_env(config),
         )
     except subprocess.TimeoutExpired:
         return f"Command timed out after {timeout}s"
@@ -128,7 +151,7 @@ def execute_bash(args: dict[str, Any], config: Config) -> str:
         parts.append(f"STDERR:\n{result.stderr}")
     if result.returncode != 0:
         parts.append(f"Exit code: {result.returncode}")
-    return "\n".join(parts) or "(no output)"
+    return _redact_secrets("\n".join(parts) or "(no output)")
 
 
 def execute_read(args: dict[str, Any], config: Config) -> str:
@@ -171,10 +194,16 @@ def execute_grep(args: dict[str, Any], config: Config) -> str:
     search_path = args.get("path", str(config.workspace_root))
     cmd = ["grep", "-rn", "--", pattern, search_path]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_subprocess_env(config),
+        )
     except subprocess.TimeoutExpired:
         return "Grep timed out"
-    return result.stdout or "(no matches)"
+    return _redact_secrets(result.stdout or "(no matches)")
 
 
 def execute_glob(args: dict[str, Any], config: Config) -> str:

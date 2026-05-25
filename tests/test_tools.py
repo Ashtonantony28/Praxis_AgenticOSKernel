@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from praxis.config import Config
 from praxis.tools import (
+    _redact_secrets,
+    _subprocess_env,
     execute_bash,
     execute_edit,
     execute_glob,
@@ -102,3 +106,59 @@ def test_get_tool_schemas_subset():
     schemas = get_tool_schemas(["Read", "Grep"])
     names = {s["name"] for s in schemas}
     assert names == {"Read", "Grep"}
+
+
+# ---------- E-1: Token propagation & secret filtering ----------
+
+
+def test_subprocess_env_includes_workspace(config: Config):
+    env = _subprocess_env(config)
+    assert env["PRAXIS_WORKSPACE_ROOT"] == str(config.workspace_root)
+    assert env["PRAXIS_MEMORY_ROOT"] == str(config.memory_root)
+
+
+def test_subprocess_env_includes_oauth_token(config: Config):
+    with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "secret-token-123"}):
+        env = _subprocess_env(config)
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "secret-token-123"
+
+
+def test_redact_secrets_oauth(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-oauth-abc123")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = _redact_secrets("output contains sk-oauth-abc123 here")
+    assert "sk-oauth-abc123" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_api_key(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xyz789")
+    result = _redact_secrets("key is sk-ant-xyz789 in output")
+    assert "sk-ant-xyz789" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_no_match(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = _redact_secrets("safe output with no secrets")
+    assert result == "safe output with no secrets"
+
+
+def test_bash_redacts_token_from_output(config: Config, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-in-output")
+    result = execute_bash({"command": "echo token-in-output"}, config)
+    assert "token-in-output" not in result
+    assert "[REDACTED]" in result
+
+
+def test_bash_passes_explicit_env(config: Config, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "my-test-token")
+    result = execute_bash(
+        {"command": "python -c \"import os; print(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', 'MISSING'))\""},
+        config,
+    )
+    # Token value is redacted but proves it was available to the subprocess
+    assert "MISSING" not in result
+    assert "[REDACTED]" in result

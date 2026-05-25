@@ -1,7 +1,7 @@
-# Morning handoff — Phase D complete
+# Morning handoff — Phase E complete
 
-**Date:** 2026-05-25 (late evening update)
-**Status:** Phase D complete (D-1 hardening, D-2 convergence routing, D-3 integration test).
+**Date:** 2026-05-25 (night session)
+**Status:** Phase E complete (E-1 token propagation, E-2 real task assessment).
 
 ---
 
@@ -24,23 +24,23 @@ praxis/                              # the orchestrator
   convergence.py                     #   ConvergenceConfig.load() — multi-runtime routing (Phase D)
   subagents.py                       #   parse .claude/agents/*.md → SubagentDef
   hooks.py                           #   run_pretool_hook() — §5 enforcement
-  tools.py                           #   7 tool schemas + implementations
+  tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E)
   orchestrator.py                    #   Orchestrator — runtime_overrides for per-subagent routing
   runtime/                           #   Provider abstraction (Phase A + C + D)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
     claude_code.py                   #     ClaudeCodeRuntime — hardened error handling (Phase D)
-    local.py                        #     LocalRuntime — hardened error handling (Phase D)
+    local.py                         #     LocalRuntime — hardened error handling (Phase D)
 
-tests/                               # 94 tests, all pass, all mocked
+tests/                               # 101 tests, all pass, all mocked
   conftest.py                        #   FakeClient, FakeResponse, workspace fixtures
   test_config.py                     #   6 tests — env resolution, restrictive fallback
   test_convergence.py                #   16 tests — YAML parsing, routing, env override, validation
   test_subagents.py                  #   8 tests — YAML parsing, model mapping
   test_hooks.py                      #   13 tests — allow/block + space-in-path regression
-  test_tools.py                      #   13 tests — Bash, Read, Edit, Write, Grep, Glob, schemas
+  test_tools.py                      #   20 tests — tools + env propagation + secret filtering (Phase E)
   test_orchestrator.py               #   8 tests — runtime delegation + subagent routing override
-  test_runtime.py                    #   8 tests — OAuth/API key + import guard + error handling
+  test_runtime.py                    #   9 tests — OAuth/API key + import guard + error handling
   test_local_runtime.py              #   21 tests — from_env, run_loop, tools, error handling
 
 .claude/agents/                      # 5 subagent definitions (unchanged)
@@ -49,9 +49,12 @@ tests/                               # 94 tests, all pass, all mocked
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  phase-d1-plan.md                   # Phase D-1 design plan (error hardening)
-  phase-d2-plan.md                   # Phase D-2 design plan (convergence routing)
-  workload-test-d3.md                # Phase D-3 integration test report
+  phase-e1-plan.md                   # Phase E-1 design plan (token propagation)
+  coverage-report.md                 # E-2 coverage analysis
+  e2-assessment.md                   # E-2 pipeline assessment
+  phase-d1-plan.md                   # Phase D-1 design plan (archived)
+  phase-d2-plan.md                   # Phase D-2 design plan (archived)
+  workload-test-d3.md               # Phase D-3 integration test report (archived)
   phase-c-plan.md                    # Phase C design plan (archived)
   phase-b-plan.md                    # Phase B design plan (archived)
   runtime-abstraction-plan.md        # Phase A design plan (archived)
@@ -61,60 +64,40 @@ tests/                               # 94 tests, all pass, all mocked
 
 ---
 
-## 2. What Phase D built
+## 2. What Phase E built
 
-### D-1: Hardened failure paths
+### E-1: OAuth token propagation to subprocesses
 
-All runtime imports, API calls, and connection errors now produce clean
-`[praxis] fatal:` messages instead of raw SDK tracebacks.
+**Problem:** `execute_bash()` and `execute_grep()` relied on implicit env inheritance
+for subprocess spawning. Token propagation was fragile and no secret filtering existed.
 
-**ClaudeCodeRuntime:**
-- Import guard: `import anthropic` wrapped in try/except (matches LocalRuntime pattern)
-- API errors: AuthenticationError, APIConnectionError, RateLimitError, APIStatusError
-- All caught in run_loop() → clean SystemExit messages
+**Fix:**
+- Added `_subprocess_env(config)` — constructs explicit env dict with all auth tokens
+  and workspace config. Passed to all `subprocess.run()` calls.
+- Added `_redact_secrets(text)` — strips `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
+  values from subprocess output before returning to the model (§5.8 compliance).
+- Both functions in `praxis/tools.py`.
+- 7 new tests confirm propagation and redaction.
 
-**LocalRuntime:**
-- Connection errors: APIConnectionError, AuthenticationError, APIStatusError
-- Empty response guard: `response.choices[0]` → checked before access
-- JSON decode guard: malformed tool arguments → error result, not crash
+### E-2: Coverage analysis (first real pipeline task)
 
-**Top-level:** `__main__.py` catches KeyboardInterrupt and unexpected exceptions.
+Ran Scout→Planner→Builder→Verifier→Scribe on "find worst test coverage."
 
-### D-2: convergence.yaml multi-runtime routing
+**Result:** `praxis/__main__.py` (69 lines, 0 tests) is the critical gap.
 
-New `praxis/convergence.py` enables config-driven runtime selection:
-
-```yaml
-# convergence.yaml (optional, at workspace root)
-runtimes:
-  default: claude
-  overrides:
-    scout: local
-    scribe: local
-local:
-  base_url: http://localhost:11434
-  model: llama3.1:8b
-```
-
-**Precedence:** `PRAXIS_RUNTIME` env var > `convergence.yaml` > `"claude"` default.
-**Routing:** Orchestrator.runtime_overrides routes subagents to different runtimes.
-**Backward compatible:** No convergence.yaml = identical to pre-D-2 behavior.
-
-### D-3: Integration test results
-
-- §5 hook: fires correctly (allows workspace ops, blocks outside writes + network)
-- Error handling: all 5 failure modes produce clean messages
-- Live API call: blocked by auth token export (deployment concern, not code bug)
-- Manual test command: `export CLAUDE_CODE_OAUTH_TOKEN=<token> && python -m praxis "hello"`
+**Pipeline assessment:** The pipeline works when sequenced by human instructions.
+Self-orchestration (Praxis driving its own pipeline) remains unvalidated because
+no live API calls were made through the orchestrator itself.
 
 ---
 
 ## 3. What stayed the same
 
-- `runtime/base.py` — Runtime interface unchanged
-- `tools.py`, `hooks.py`, `config.py`, `subagents.py` — unchanged
+- `runtime/` — unchanged
+- `hooks.py`, `config.py`, `subagents.py`, `convergence.py` — unchanged
+- `orchestrator.py` — unchanged
 - §5 hook enforcement — all 13 hook tests pass
-- All 69 pre-D tests — unchanged and passing
+- All 94 pre-E tests — unchanged and passing
 
 ---
 
@@ -122,34 +105,37 @@ local:
 
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
-python -m pytest tests/ -v                    # 94 tests, all should pass
-python -c "from praxis.convergence import ConvergenceConfig"
+python -m pytest tests/ -v                    # 101 tests, all should pass
 
-# Error handling (no real auth needed):
-ANTHROPIC_API_KEY=bad python -m praxis "hi"   # clean auth error
-PRAXIS_RUNTIME=local python -m praxis "hi"    # clean connection error
-
-# With real auth:
-export CLAUDE_CODE_OAUTH_TOKEN=<real-token>
-python -m praxis "hello"
+# Token propagation test:
+export CLAUDE_CODE_OAUTH_TOKEN=test-value
+python -c "from praxis.tools import execute_bash; from praxis.config import Config; \
+  c = Config.from_env(); print(execute_bash({'command': 'echo \$CLAUDE_CODE_OAUTH_TOKEN'}, c))"
+# Should print [REDACTED], proving: (a) token reached subprocess, (b) was filtered from output
 ```
 
 ---
 
-## 5. What remains
+## 5. What remains — Phase F priorities
 
-### Committed and ready
-- All Phase 0–D code is on branch `claude/blissful-franklin-VIMiH`
-- 94 tests green, no known bugs
-- PR to `claude/plan-execute-mode-switch-zCz38` when ready
+Based on what E-2 revealed, in priority order:
 
-### Phase E priorities
+1. **Live end-to-end validation.** Run `python -m praxis "describe this repo"` with
+   real OAuth credentials. Confirm: auth → API call → tool use → §5 hook fires →
+   response returned. This is the single most important unvalidated path.
 
-1. **OAuth subprocess propagation gap (PRIORITY 1).** `CLAUDE_CODE_OAUTH_TOKEN` is set in the Claude Code shell session but not exported to child processes. `python -m praxis` cannot see it. Fix options: (a) document `export` requirement, (b) read token from a file/keyring, (c) pass via `--token` CLI flag. This blocks all live integration testing.
-2. **Live API conversation:** Once auth propagation is fixed, run end-to-end with real credentials and confirm §5 hook fires during tool execution.
-3. **convergence.yaml file:** Deploy a default config file in the repo.
-4. **Context window management:** `manage_context()` is append-only — no summarization/pruning yet.
-5. **Streaming:** Both runtimes use synchronous API calls — no streaming output.
+2. **`__main__.py` test coverage.** Add integration tests for `_create_runtimes()`
+   and `main()` error paths — highest-risk untested code.
+
+3. **§5 hook: allow device writes.** `/dev/null`, `/dev/stdout`, `/dev/stderr` should
+   not be blocked. The path regex is overly conservative.
+
+4. **Self-orchestration.** Praxis should drive its own Scout→Planner→Builder→Verifier
+   pipeline via the Agent tool, not rely on human sequencing. This requires validating
+   the multi-turn loop with real API calls first (priority 1).
+
+5. **Context management.** `manage_context()` is append-only — needs summarization
+   before any multi-turn task can complete without hitting context limits.
 
 ---
 
@@ -164,3 +150,5 @@ python -m praxis "hello"
 | D-1 | Harden failure paths (error handling) | 77 |
 | D-2 | convergence.yaml multi-runtime routing | 94 |
 | D-3 | Integration test report | 94 |
+| E-1 | Token propagation + secret filtering | 101 |
+| E-2 | Coverage analysis + pipeline assessment | 101 |
