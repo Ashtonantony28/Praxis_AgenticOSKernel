@@ -44,7 +44,7 @@ class ClaudeCodeRuntime(Runtime):
 
         if oauth_token:
             os.environ.pop("ANTHROPIC_API_KEY", None)
-            client = anthropic.Anthropic(api_key=oauth_token)
+            client = anthropic.Anthropic(auth_token=oauth_token)
             return cls(client, auth_method="oauth")
         elif api_key:
             client = anthropic.Anthropic()

@@ -35,8 +35,10 @@ class Orchestrator:
         path = self.config.workspace_root / "praxis-system-prompt.md"
         return path.read_text()
 
-    def run(self, user_message: str, model: str = "claude-sonnet-4-6") -> str:
+    def run(self, user_message: str, model: str | None = None) -> str:
         """Run the orchestrator agent loop with the full system prompt."""
+        import os
+        model = model or os.environ.get("PRAXIS_MODEL", "claude-sonnet-4-6")
         return self.runtime.run_loop(
             model=model,
             system=self.system_prompt,

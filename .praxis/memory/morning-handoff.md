@@ -1,7 +1,7 @@
-# Morning handoff — Phase F complete
+# Morning handoff — Phase G complete
 
-**Date:** 2026-05-25 (night session)
-**Status:** Phase F complete (F-1 through F-4).
+**Date:** 2026-05-25
+**Status:** Phase G complete. First live API round-trip confirmed. Full subagent path confirmed.
 
 ---
 
@@ -24,83 +24,75 @@ praxis/                              # the orchestrator
   subagents.py                       #   parse .claude/agents/*.md → SubagentDef
   hooks.py                           #   run_pretool_hook() — §5 enforcement
   tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E)
-  orchestrator.py                    #   Orchestrator — runtime_overrides for per-subagent routing
+  orchestrator.py                    #   Orchestrator — PRAXIS_MODEL support added (Phase G)
   runtime/                           #   Provider abstraction (Phase A + C + D)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
-    claude_code.py                   #     ClaudeCodeRuntime — hardened error handling (Phase D)
+    claude_code.py                   #     ClaudeCodeRuntime — auth_token= fix (Phase G)
     local.py                         #     LocalRuntime — hardened error handling (Phase D)
 
 tests/                               # 116 tests, all pass, all mocked
   conftest.py                        #   FakeClient, FakeResponse, workspace fixtures
-  test_config.py                     #   6 tests — env resolution, restrictive fallback
-  test_convergence.py                #   16 tests — YAML parsing, routing, env override, validation
-  test_subagents.py                  #   8 tests — YAML parsing, model mapping
-  test_hooks.py                      #   17 tests — allow/block + space-in-path + /dev/null (Phase F)
-  test_tools.py                      #   20 tests — tools + env propagation + secret filtering
-  test_orchestrator.py               #   8 tests — runtime delegation + subagent routing override
-  test_runtime.py                    #   9 tests — OAuth/API key + import guard + error handling
-  test_local_runtime.py              #   21 tests — from_env, run_loop, tools, error handling
-  test_main.py                       #   11 tests — _create_runtimes() + main() entry point (Phase F)
+  test_config.py                     #   6 tests
+  test_convergence.py                #   16 tests
+  test_subagents.py                  #   8 tests
+  test_hooks.py                      #   17 tests
+  test_tools.py                      #   20 tests
+  test_orchestrator.py               #   8 tests
+  test_runtime.py                    #   9 tests — updated for auth_token= (Phase G)
+  test_local_runtime.py              #   21 tests
+  test_main.py                       #   11 tests
 
-.claude/agents/                      # 5 subagent definitions (unchanged)
-.claude/hooks/escalation-boundary.py # §5 hook — /dev/null fix applied (Phase F)
+.claude/agents/                      # 5 subagent definitions (builder, planner, scout, scribe, verifier)
+.claude/hooks/escalation-boundary.py # §5 hook (device path fix from F-3 still in place)
 .claude/settings.json                # hook wiring (unchanged)
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  f1-selforch-test.md               # Phase F-1 live test results + honest assessment
-  phase-e1-plan.md                   # Phase E-1 design plan (archived)
-  coverage-report.md                 # E-2 coverage analysis (archived)
-  e2-assessment.md                   # E-2 pipeline assessment (archived)
-  phase-d1-plan.md                   # Phase D-1 design plan (archived)
-  phase-d2-plan.md                   # Phase D-2 design plan (archived)
-  workload-test-d3.md               # Phase D-3 integration test report (archived)
-  phase-c-plan.md                    # Phase C design plan (archived)
-  phase-b-plan.md                    # Phase B design plan (archived)
-  runtime-abstraction-plan.md        # Phase A design plan (archived)
-  phase0-plan.md                     # Phase 0 design plan (archived)
-  .gitkeep
+  first-live-run.md                  # Phase G milestone — full live run results
+  phase-g-plan.md                    # Phase G design plan
+  f1-selforch-test.md               # Phase F-1 assessment (now superseded)
+  [archived phase plans...]
 ```
 
 ---
 
-## 2. What Phase F built
+## 2. What Phase G built
 
-### F-1: Live self-orchestration test
+### The fix
 
-**Result: structurally unvalidated.** All orchestrator init paths work against
-real files (config, convergence, subagents, tools, system prompt). The API call
-itself cannot be made from within a Claude Code session — auth tokens are
-correctly sandboxed from child processes.
+One line in `praxis/runtime/claude_code.py`:
 
-Full findings in `.praxis/memory/f1-selforch-test.md`.
+```python
+# Before: OAuth token in x-api-key header → 401
+client = anthropic.Anthropic(api_key=oauth_token)
 
-### F-2: `__main__.py` test coverage
+# After: OAuth token as Bearer → 200
+client = anthropic.Anthropic(auth_token=oauth_token)
+```
 
-11 new tests covering `_create_runtimes()` (5 tests) and `main()` (6 tests).
-Coverage: **98%** (only the `if __name__ == "__main__"` guard line uncovered).
+The F-1 report misdiagnosed the failure as "tokens sandboxed from child processes."
+Tokens were always available. The real bug was the wrong SDK parameter.
 
-### F-3: §5 hook `/dev/null` fix
+### Additional change
 
-**Bug:** Redirecting to `/dev/null`, `/dev/stdout`, `/dev/stderr` in Bash commands
-was blocked because these paths are outside WORKSPACE_ROOT.
+`orchestrator.py` now reads `PRAXIS_MODEL` env var (default: `claude-sonnet-4-6`).
+Needed to test with Haiku (Sonnet is rate-limited on the OAuth session token).
 
-**Fix:** Added `_SAFE_DEVICE_PATHS` frozenset to `escalation-boundary.py`. The
-`check_bash()` loop now skips resolved paths matching these device files.
-4 new regression tests confirm the fix.
+### What was confirmed live
 
-### F-4: Self-orchestration readiness assessment (this section)
+1. OAuth → API: authentication works, `auth_token=` is correct for `sk-ant-oat` tokens
+2. Direct tool call: orchestrator → Glob → §5 hook → tool result → response
+3. Subagent call: orchestrator → Agent tool → Scout spawned → Scout uses Glob → result bubbles up
+4. Secret filtering: token never leaked into output
 
-See section 5 below.
+Full output recorded in `.praxis/memory/first-live-run.md`.
 
 ---
 
 ## 3. What stayed the same
 
-- `praxis/` — all source files unchanged (only .claude/hooks was patched)
-- `runtime/`, `orchestrator.py`, `tools.py`, `config.py`, `convergence.py` — unchanged
-- All 101 pre-F tests — unchanged and passing
+All 116 pre-G tests pass (2 assertions updated to expect `auth_token=` instead of `api_key=`).
 
 ---
 
@@ -108,79 +100,53 @@ See section 5 below.
 
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
-python -m pytest tests/ -v                    # 116 tests, all should pass
+export PRAXIS_MODEL=claude-haiku-4-5-20251001   # Haiku avoids OAuth rate limits
 
-# Coverage check:
-pip install pytest-cov
-python -m pytest tests/test_main.py --cov=praxis.__main__ --cov-report=term-missing
-# Should show 98% coverage
+# Direct tool call (confirms auth + tool dispatch):
+python -m praxis "Use the Glob tool to list files matching '*.py' in praxis/"
 
-# /dev/null fix verification:
-python -m pytest tests/test_hooks.py -k dev -v
-# Should show 4 tests passing
+# Subagent call (confirms full path):
+python -m praxis "Use the Agent tool to spawn scout with: list the files in praxis/"
+
+# Full test suite:
+python -m pytest tests/ -v
 ```
 
 ---
 
-## 5. Is Praxis ready for unattended autonomous operation?
+## 5. What the next session should tackle
 
-**No.** The honest answer is no, and here is exactly why.
+### Priority 1: Full five-subagent pipeline on a real task
 
-### What works (validated)
+The single-subagent path works. The next proof is a real task that drives
+Scout → Planner → Builder → Verifier → Scribe:
 
-- **Init pipeline**: Config → Convergence → Runtime creation → Orchestrator init — all
-  validated against real files, not just mocks. (F-1)
-- **Tool dispatch**: All 7 tools work correctly with §5 enforcement. 116 tests confirm. (F-2)
-- **§5 hook**: Correctly blocks out-of-workspace writes, network egress, control plane
-  modification. Device paths now handled correctly. (F-3)
-- **Multi-runtime routing**: Convergence config, per-subagent overrides, runtime selection —
-  all covered by 16 tests. (Phase D)
-- **Secret filtering**: Auth tokens never leak into tool results. (Phase E)
+```bash
+export PRAXIS_WORKSPACE_ROOT=$(pwd)
+export PRAXIS_MODEL=claude-haiku-4-5-20251001
+python -m praxis "Investigate how error handling works in this codebase, plan a small improvement, implement it, verify tests still pass, and write a memory entry documenting what changed."
+```
 
-### What has NEVER been validated
+This exercises:
+- Scout: read code, find the error handling
+- Planner: design the improvement
+- Builder: implement it
+- Verifier: run tests
+- Scribe: write memory
 
-1. **Zero live API round-trips have ever been completed.** The `run_loop` method in
-   `ClaudeCodeRuntime` has only been tested with `FakeClient`. No one has ever seen
-   a real response from Claude come back through the orchestrator.
+Watch for: context window exhaustion (append-only `manage_context`), rate limiting
+between subagent calls, the model not naturally chaining all five agents.
 
-2. **Self-orchestration (the core claim) is untested.** Does the model actually invoke
-   the Agent tool to chain Scout → Planner → Builder → Verifier → Scribe? Unknown.
-   The system prompt tells it to, but whether the model follows that instruction in
-   practice has never been observed.
+### Priority 2: Context window management
 
-3. **Context management is append-only.** `manage_context()` just appends messages.
-   Any multi-subagent task will hit the context window limit. A real overnight run
-   would fail silently after the first few subagent exchanges.
+`manage_context()` appends indefinitely. A five-agent pipeline will likely hit the
+limit. Implement a sliding window (keep last N messages) or summarize-and-compact
+before the next unattended session. This is the most critical gap remaining.
 
-4. **Error recovery under real load is untested.** Rate limiting, partial failures,
-   malformed model responses — the error handling exists but has never been exercised
-   with real API responses.
+### Priority 3: Retry on rate limit
 
-### What must be true before the first real unattended session
-
-1. **One successful live API call.** Run `python -m praxis "describe this repo"` from
-   a normal terminal with `ANTHROPIC_API_KEY` exported. Observe: auth works, tool calls
-   execute, §5 hook fires, response returns. This takes 60 seconds and proves the core
-   path works.
-
-2. **Context window management.** Implement summarization in `manage_context()` — either
-   a sliding window or a summary-and-compact strategy. Without this, any multi-turn task
-   will fail.
-
-3. **Graceful degradation on API errors.** The current error handling exits on any API
-   failure. An unattended session needs retry logic with exponential backoff for transient
-   errors (rate limits, connection drops).
-
-4. **Output persistence.** The orchestrator currently prints to stdout. An unattended
-   session needs to write results to a durable file, not a terminal nobody is watching.
-
-### Bottom line
-
-Praxis is a well-tested blueprint. The plumbing is solid — 116 tests, 98% coverage on
-the entry point, hardened error handling, secret filtering. But it has never pumped
-real water. The gap between "all mocked tests pass" and "runs autonomously overnight"
-is the gap between a blueprint and a building. Items 1-2 above are the minimum viable
-path to closing that gap.
+Current behavior: 429 → `SystemExit`. For the five-subagent test to complete, add
+exponential backoff (3 retries, 1s/2s/4s) before giving up. Small change, high value.
 
 ---
 
@@ -201,3 +167,4 @@ path to closing that gap.
 | F-2 | `__main__.py` test coverage (98%) | 112 |
 | F-3 | §5 hook `/dev/null` device path fix | 116 |
 | F-4 | Self-orchestration readiness assessment | 116 |
+| G | **Fix OAuth auth_token= bug. First live run confirmed.** | 116 |

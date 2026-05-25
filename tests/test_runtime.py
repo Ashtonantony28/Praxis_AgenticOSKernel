@@ -37,7 +37,7 @@ def test_from_env_oauth_token(monkeypatch, mock_anthropic):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok-123")
     runtime = ClaudeCodeRuntime.from_env()
     assert runtime.auth_method == "oauth"
-    mock_anthropic.Anthropic.assert_called_once_with(api_key="oauth-tok-123")
+    mock_anthropic.Anthropic.assert_called_once_with(auth_token="oauth-tok-123")
 
 
 def test_from_env_api_key(monkeypatch, mock_anthropic):
@@ -54,7 +54,7 @@ def test_from_env_oauth_priority(monkeypatch, mock_anthropic):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-123")
     runtime = ClaudeCodeRuntime.from_env()
     assert runtime.auth_method == "oauth"
-    mock_anthropic.Anthropic.assert_called_once_with(api_key="oauth-tok-123")
+    mock_anthropic.Anthropic.assert_called_once_with(auth_token="oauth-tok-123")
 
 
 def test_from_env_oauth_scrubs_api_key(monkeypatch, mock_anthropic):
