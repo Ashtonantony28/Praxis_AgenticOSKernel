@@ -1,23 +1,25 @@
-"""Core agent loop — drives the Claude API with tool dispatch and §5 hook."""
+"""Core agent loop — drives the Runtime with tool dispatch and §5 hook."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .hooks import HookResult, run_pretool_hook
+from .hooks import run_pretool_hook
+from .runtime.base import Runtime
 from .subagents import load_subagents
 from .tools import TOOL_IMPLEMENTATIONS, get_tool_schemas
 
-MAX_TURNS = 50  # safety limit on agent loop iterations
-
 
 class Orchestrator:
-    """Minimal orchestrator that makes praxis-system-prompt.md executable."""
+    """Minimal orchestrator that makes praxis-system-prompt.md executable.
 
-    def __init__(self, client: Any, config: Config) -> None:
-        self.client = client
+    Owns the *what*: which tools, which hooks, which subagents, which config.
+    Delegates the *how* (API protocol) to the Runtime.
+    """
+
+    def __init__(self, runtime: Runtime, config: Config) -> None:
+        self.runtime = runtime
         self.config = config
         self.system_prompt = self._load_system_prompt()
         self.subagents = load_subagents(config.workspace_root / ".claude" / "agents")
@@ -28,11 +30,12 @@ class Orchestrator:
 
     def run(self, user_message: str, model: str = "claude-sonnet-4-6") -> str:
         """Run the orchestrator agent loop with the full system prompt."""
-        return self._run_loop(
+        return self.runtime.run_loop(
             model=model,
             system=self.system_prompt,
             user_message=user_message,
-            tool_names=None,
+            tool_schemas=get_tool_schemas(),
+            tool_executor=self._execute_with_hook,
         )
 
     def run_subagent(self, name: str, prompt: str) -> str:
@@ -41,62 +44,13 @@ class Orchestrator:
             available = ", ".join(sorted(self.subagents))
             return f"Error: unknown subagent '{name}'. Available: {available}"
         defn = self.subagents[name]
-        return self._run_loop(
+        return self.runtime.spawn_subagent(
             model=defn.model,
             system=defn.system_prompt,
-            user_message=prompt,
-            tool_names=defn.tools,
+            prompt=prompt,
+            tool_schemas=get_tool_schemas(defn.tools),
+            tool_executor=self._execute_with_hook,
         )
-
-    def _run_loop(
-        self,
-        model: str,
-        system: str,
-        user_message: str,
-        tool_names: list[str] | None,
-    ) -> str:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
-        tool_schemas = get_tool_schemas(tool_names)
-
-        response = None
-        for _ in range(MAX_TURNS):
-            response = self.client.messages.create(
-                model=model,
-                system=system,
-                messages=messages,
-                tools=tool_schemas,
-                max_tokens=4096,
-            )
-
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "end_turn":
-                return self._extract_text(response)
-
-            tool_results = self._process_tool_calls(response.content)
-            if not tool_results:
-                break
-
-            messages.append({"role": "user", "content": tool_results})
-
-        return self._extract_text(response) if response else ""
-
-    def _process_tool_calls(
-        self, content: list[Any]
-    ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for block in content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-            output = self._execute_with_hook(block.name, block.input)
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                }
-            )
-        return results
 
     def _execute_with_hook(
         self, tool_name: str, tool_input: dict[str, Any]
@@ -120,12 +74,3 @@ class Orchestrator:
             return impl(tool_input, self.config)
         except Exception as exc:
             return f"Error executing {tool_name}: {exc}"
-
-    @staticmethod
-    def _extract_text(response: Any) -> str:
-        parts = [
-            block.text
-            for block in response.content
-            if getattr(block, "type", None) == "text"
-        ]
-        return "\n".join(parts) if parts else ""

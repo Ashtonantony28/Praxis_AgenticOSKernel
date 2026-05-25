@@ -9,12 +9,16 @@ Praxis is a minimal Python orchestrator for an agentic OS built on the Claude AP
 ```
 praxis-system-prompt.md          # The spec (§0–§11)
 praxis/                          # Python orchestrator package
-  orchestrator.py                # Agent loop: messages API → tool dispatch → hook
+  orchestrator.py                # Orchestrator: tool dispatch + §5 hook (delegates API to Runtime)
   config.py                      # WORKSPACE_ROOT, MEMORY_ROOT from env vars
   subagents.py                   # Parses .claude/agents/*.md into SubagentDef
   hooks.py                       # Runs escalation-boundary.py as PreToolUse check
   tools.py                       # Tool schemas + implementations (Bash, Read, Edit, Write, Grep, Glob, Agent)
   __main__.py                    # python -m praxis entrypoint
+  runtime/                       # Provider abstraction layer (Phase A)
+    __init__.py                  #   exports Runtime, ClaudeCodeRuntime
+    base.py                      #   Abstract Runtime interface (4 methods)
+    claude_code.py               #   ClaudeCodeRuntime — Anthropic Messages API implementation
 .claude/agents/                  # Subagent definitions (builder, planner, scout, scribe, verifier)
 .claude/hooks/escalation-boundary.py  # §5 hook — blocks out-of-workspace writes, network egress
 .claude/settings.json            # Claude Code hook wiring
@@ -43,3 +47,4 @@ python -m pytest tests/ -v
 - **No real API calls in tests.** All tests use FakeClient from `tests/conftest.py`.
 - **Config from env vars.** `PRAXIS_WORKSPACE_ROOT` and `PRAXIS_MEMORY_ROOT` — restrictive fallback per §0 if unset.
 - **Model mapping:** `haiku` → `claude-haiku-4-5-20251001`, `sonnet` → `claude-sonnet-4-6`, `opus` → `claude-opus-4-6`.
+- **Runtime interface.** `Orchestrator` takes a `Runtime` (not a raw client). `ClaudeCodeRuntime` wraps the Anthropic SDK. To add a new provider, subclass `Runtime` in `praxis/runtime/` and implement 4 methods: `run_loop`, `spawn_subagent`, `execute_tool`, `manage_context`.

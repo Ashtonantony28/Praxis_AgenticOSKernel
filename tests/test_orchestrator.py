@@ -6,6 +6,7 @@ from pathlib import Path
 
 from praxis.config import Config
 from praxis.orchestrator import Orchestrator
+from praxis.runtime import ClaudeCodeRuntime
 from tests.conftest import (
     FakeClient,
     FakeResponse,
@@ -16,7 +17,7 @@ from tests.conftest import (
 
 def test_orchestrator_init(config: Config, workspace: Path):
     client = FakeClient([])
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     assert orch.system_prompt == "# Test System Prompt\n"
     assert "scout" in orch.subagents
     assert "builder" in orch.subagents
@@ -26,7 +27,7 @@ def test_orchestrator_init(config: Config, workspace: Path):
 def test_run_end_turn_immediately(config: Config):
     responses = [FakeResponse(content=[FakeTextBlock("Hello!")], stop_reason="end_turn")]
     client = FakeClient(responses)
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Hi")
     assert result == "Hello!"
     assert len(client.messages.calls) == 1
@@ -51,7 +52,7 @@ def test_tool_dispatch_read(config: Config, workspace: Path):
         ),
     ]
     client = FakeClient(responses)
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Read sample.txt")
 
     assert result == "I read the file."
@@ -85,7 +86,7 @@ def test_hook_blocks_tool(config: Config, workspace: Path):
         ),
     ]
     client = FakeClient(responses)
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Write to /tmp")
 
     assert result == "I was blocked."
@@ -118,7 +119,7 @@ def test_subagent_dispatch(config: Config, workspace: Path):
             stop_reason="end_turn",
         ),
     ])
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Investigate")
     assert result == "Scout found files."
 
@@ -148,7 +149,7 @@ def test_unknown_subagent(config: Config):
         ),
     ]
     client = FakeClient(responses)
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Bad agent")
     assert result == "Error handled."
 
@@ -174,7 +175,7 @@ def test_unknown_tool(config: Config):
         ),
     ]
     client = FakeClient(responses)
-    orch = Orchestrator(client, config)
+    orch = Orchestrator(ClaudeCodeRuntime(client), config)
     result = orch.run("Use magic")
     assert result == "Handled."
 

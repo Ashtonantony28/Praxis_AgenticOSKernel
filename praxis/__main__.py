@@ -8,12 +8,14 @@ import anthropic
 
 from .config import Config
 from .orchestrator import Orchestrator
+from .runtime import ClaudeCodeRuntime
 
 
 def main() -> None:
     config = Config.from_env()
     client = anthropic.Anthropic()
-    orch = Orchestrator(client, config)
+    runtime = ClaudeCodeRuntime(client)
+    orch = Orchestrator(runtime, config)
 
     if len(sys.argv) > 1:
         message = " ".join(sys.argv[1:])
