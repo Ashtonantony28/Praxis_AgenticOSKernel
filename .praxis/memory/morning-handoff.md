@@ -1,9 +1,8 @@
-# Morning handoff — Phase C complete, ready for Phase D
+# Morning handoff — Phase C complete, Phase D resequenced
 
-**Date:** 2026-05-25
-**Status:** Phase C **done**. LocalRuntime implemented and tested (69 tests
-green). Runtime selection via `PRAXIS_RUNTIME=local` env var.
-Phase D (convergence.yaml multi-runtime config switch) is next.
+**Date:** 2026-05-25 (evening update)
+**Status:** Phase C complete. Real workload testing revealed 2 error handling gaps;
+Phase D resequenced: harden failure paths first (D-1), then convergence.yaml (D-2).
 
 ---
 
@@ -121,33 +120,71 @@ python -m praxis "hello"            # should get a response from llama3.1:8b
 
 ---
 
-## 5. What Phase D should do
+## 5. Real workload test findings (2026-05-25 evening)
 
-**Goal:** Multi-runtime config switch via `convergence.yaml`.
+### Task 1: ClaudeCodeRuntime with OAuth
+- Auth path selection: **PASS** — `[praxis] auth: oauth` logged correctly
+- Env scrubbing: **PASS** — API key removed from os.environ when OAuth active
+- No-auth error handling: **PASS** — clean SystemExit message
+- API call: 401 (expected with placeholder token)
+- §5 hook wiring: correct per scout trace, untested in live run (auth crash before tool dispatch)
+- **Error gap:** raw anthropic SDK traceback on auth failure (no user-friendly wrapper)
 
-1. Define `convergence.yaml` schema — selects runtime per role:
-   ```yaml
-   runtimes:
-     default: claude
-     overrides:
-       scout: local
-       scribe: local
-   local:
-     base_url: http://localhost:11434
-     model: llama3.1:8b
-   ```
-2. Update `Orchestrator` to hold multiple runtimes, route by subagent role
-3. Add config parsing in `praxis/config.py` or new `praxis/convergence.py`
-4. Tests: routing logic, fallback behavior, invalid config handling
-5. Do not change §5 hook, tools, or the Runtime interface contract
+### Task 2: ClaudeCodeRuntime with API key
+- Auth path selection: **PASS** — `[praxis] auth: api_key` logged correctly
+- Same auth error behavior as Task 1
+
+### Task 3: LocalRuntime
+- Runtime selection: **PASS** — logs runtime info correctly
+- from_env(): **PASS** — client created, model resolved
+- Connection refused: expected (Ollama not running)
+- **Error gap:** 50+ line traceback from httpx internals (no user-friendly wrapper)
+
+### Cross-cutting findings
+- **Test suite:** 69 tests all green (all mocked, no real API calls)
+- **Import error gap:** ClaudeCodeRuntime.from_env() missing try/except on `import anthropic`
+  — raw ModuleNotFoundError. LocalRuntime wraps its import correctly.
+- Invalid PRAXIS_RUNTIME: **PASS** — clean error message
+- All runtime wiring confirmed correct by scout
 
 ---
 
-## 6. Recommended next-session prompt
+## 6. Phase D resequenced: hardening first
 
-> Begin Phase D: add convergence.yaml multi-runtime config switch. Read
-> `CLAUDE.md` and `.praxis/memory/morning-handoff.md` for current state.
-> Both runtimes work (Claude + Local). Goal: route subagent roles to
-> different runtimes based on a yaml config file. 69 tests green. Use
-> the full pipeline: Scout → Plan → Build → Verify → Scribe. Do not
-> expand scope beyond the routing config.
+**Phase D-1: Harden failure paths (PREREQUISITE)**
+- [ ] Wrap `import anthropic` in try/except with clean SystemExit (match LocalRuntime pattern)
+- [ ] Add connection error handling in both run_loop() implementations
+- [ ] Wrap auth/network errors in user-friendly messages (not raw SDK tracebacks)
+
+**Phase D-2: Convergence.yaml multi-runtime routing (ORIGINAL GOAL)**
+- [ ] Define convergence.yaml schema — route subagent roles to different runtimes:
+  ```yaml
+  runtimes:
+    default: claude
+    overrides:
+      scout: local
+      scribe: local
+  local:
+    base_url: http://localhost:11434
+    model: llama3.1:8b
+  ```
+- [ ] Update `Orchestrator` to hold multiple runtimes, route by subagent role
+- [ ] Add config parsing in `praxis/config.py` or new `praxis/convergence.py`
+- [ ] Tests: routing logic, fallback behavior, invalid config handling
+
+**Phase D-3: Live integration test (REQUIRES REAL AUTH + OLLAMA)**
+- [ ] Re-run 3-task workload with real credentials
+- [ ] Confirm §5 hook fires during actual tool execution
+- [ ] Write codebase-audit.md output to .praxis/memory/
+
+---
+
+## 7. Recommended next-session prompt
+
+> Begin Phase D-1: harden failure paths in both runtimes. Read
+> `CLAUDE.md` and `.praxis/memory/morning-handoff.md` for current state
+> and the 2 error-handling gaps found in real workload testing. Wrap
+> raw SDK tracebacks in user-friendly messages. Once D-1 is green,
+> Phase D-2 (convergence.yaml routing) can proceed. Use the full
+> pipeline: Scout → Plan → Build → Verify → Scribe. Do not expand
+> scope beyond error handling and the routing config.
