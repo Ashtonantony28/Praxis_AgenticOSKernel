@@ -1,1 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Test/coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Environment — never commit real credentials
+.env
+
+# Claude Code local settings override
 .claude/settings.local.json
+
+# Praxis local state
+.praxis/queue/
+.praxis/staging/
+.praxis/logs/
+.praxis/praxis.pid

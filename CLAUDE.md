@@ -9,6 +9,11 @@ Praxis is a minimal Python orchestrator for an agentic OS built on the Claude AP
 ```
 praxis-system-prompt.md          # The spec (§0–§11)
 convergence.yaml                 # Multi-runtime routing config (optional — Phase D)
+README.md                        # Project README — what, why, quickstart, architecture
+install.sh                       # One-command installer (Python check, venv, deps, workspace dirs)
+.env.example                     # Every env var documented with comments
+demo/
+  demo.sh                        # §5 escalation boundary demo — 7 scenarios, no API key needed
 praxis/                          # Python orchestrator package
   orchestrator.py                # Orchestrator: tool dispatch + §5 hook (delegates API to Runtime)
   config.py                      # WORKSPACE_ROOT, MEMORY_ROOT from env vars
@@ -52,6 +57,9 @@ tests/                           # pytest suite (388 tests, all mocked — no re
 ## Running
 
 ```bash
+# One-command install (creates venv, installs deps, prints setup checklist)
+bash install.sh
+
 # Set workspace root (defaults to cwd if unset)
 export PRAXIS_WORKSPACE_ROOT=/path/to/repo
 export PRAXIS_MEMORY_ROOT=$PRAXIS_WORKSPACE_ROOT/.praxis/memory

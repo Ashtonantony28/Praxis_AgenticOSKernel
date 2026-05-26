@@ -12,8 +12,23 @@ dependencies = [
 local = [
     "openai>=1.0",
 ]
+cloud = [
+    "openai>=1.0",
+]
+analyze = [
+    "coverage",
+    "radon",
+    "pylint",
+    "pip-audit",
+]
 dev = [
     "pytest>=8.0",
+]
+all = [
+    "praxis[local]",
+    "praxis[cloud]",
+    "praxis[analyze]",
+    "praxis[dev]",
 ]
 
 [build-system]
