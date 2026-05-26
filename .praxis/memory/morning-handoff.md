@@ -1,14 +1,14 @@
-# Morning handoff — Phase J complete
+# Morning handoff — Phase J + pipeline validation complete
 
-**Date:** 2026-05-25
-**Status:** Phase J complete. Unattended operation infrastructure implemented. 203 tests pass.
+**Date:** 2026-05-25  
+**Status:** Phase J complete. Pipeline validated end-to-end with Gemini 2.5 Flash. 205 tests pass.
 
 ---
 
 ## 1. Exact repo state
 
-**Repo:** `Ashtonantony28/Praxis_AgenticOSKernel`
-**Branch:** `claude/blissful-franklin-VIMiH`
+**Repo:** `Ashtonantony28/Praxis_AgenticOSKernel`  
+**Branch:** `claude/blissful-franklin-VIMiH`  
 **Main branch:** `claude/plan-execute-mode-switch-zCz38`
 
 ```
@@ -25,34 +25,34 @@ praxis/                              # the orchestrator
   hooks.py                           #   run_pretool_hook() — §5 enforcement
   tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E)
   orchestrator.py                    #   Orchestrator — PRAXIS_MODEL support (Phase G)
-  queue.py                           #   TaskQueue — CRUD on tasks.jsonl (NEW — Phase J)
-  checkpoint.py                      #   CheckpointStore — multi-stage task resumption (NEW — Phase J)
-  queue_runner.py                    #   Queue processing loop (NEW — Phase J)
-  daemon.py                          #   Daemon start/stop/status (NEW — Phase J)
+  queue.py                           #   TaskQueue — CRUD on tasks.jsonl (Phase J)
+  checkpoint.py                      #   CheckpointStore — atomic writes via os.replace() (Phase J + fix)
+  queue_runner.py                    #   Queue processing loop — SIGTERM behavior documented (Phase J + fix)
+  daemon.py                          #   Daemon start/stop/status (Phase J)
   runtime/                           #   Provider abstraction (Phase A + C + D + H + I)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime, OpenAICloudRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
     openai_base.py                   #     OpenAIBaseRuntime — shared OpenAI-compatible logic
     claude_code.py                   #     _create_with_retry() + sliding window (Phase H)
     local.py                         #     Ollama/vLLM/llama.cpp — inherits OpenAIBaseRuntime
-    cloud.py                         #     OpenAICloudRuntime — cloud OpenAI-compat APIs
+    cloud.py                         #     OpenAICloudRuntime — _resolve_model() added, retry 5/135s
 
-tests/                               # 203 tests, all pass, all mocked
-  conftest.py                        #   FakeClient, FakeResponse, workspace fixtures
+tests/                               # 205 tests, all pass, all mocked
+  conftest.py
   test_config.py                     #   6 tests
   test_convergence.py                #   16 tests
   test_subagents.py                  #   8 tests
   test_hooks.py                      #   17 tests
   test_tools.py                      #   20 tests
   test_orchestrator.py               #   8 tests
-  test_runtime.py                    #   15 tests — retry + context management (Phase H)
-  test_local_runtime.py              #   25 tests — context management (Phase H)
-  test_cloud_runtime.py              #   18 tests — cloud runtime + convergence routing (Phase I)
-  test_main.py                       #   20 tests — interactive + queue/daemon modes (Phase J)
-  test_queue.py                      #   20 tests — task CRUD + crash recovery (NEW)
-  test_checkpoint.py                 #   12 tests — checkpoint write/resume (NEW)
-  test_queue_runner.py               #   8 tests — atomic + staged execution (NEW)
-  test_daemon.py                     #   10 tests — PID, stop, status (NEW)
+  test_runtime.py                    #   15 tests
+  test_local_runtime.py              #   25 tests
+  test_cloud_runtime.py              #   21 tests (3 new: _resolve_model behavior)
+  test_main.py                       #   20 tests
+  test_queue.py                      #   20 tests
+  test_checkpoint.py                 #   12 tests
+  test_queue_runner.py               #   8 tests
+  test_daemon.py                     #   10 tests
 
 .claude/agents/                      # 5 subagent definitions (builder, planner, scout, scribe, verifier)
 .claude/hooks/escalation-boundary.py # §5 hook
@@ -60,16 +60,18 @@ tests/                               # 203 tests, all pass, all mocked
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  phase-j-plan.md                    # Phase J design plan (NEW)
-  model-agnostic-plan.md             # Phase I design plan
-  h3-pipeline-report.md             # Phase H pipeline test results
-  first-live-run.md                  # Phase G milestone
-  phase-g-plan.md                    # Phase G design plan
+  pipeline-validation-report.md     # pipeline validation results (NEW)
+  unattended-readiness.md           # overnight readiness verdict (NEW)
+  phase-j-plan.md
+  model-agnostic-plan.md
+  h3-pipeline-report.md
+  first-live-run.md
+  phase-g-plan.md
 
-.praxis/queue/                       # Task queue directory (NEW — Phase J)
-  tasks.jsonl                        #   One JSON task per line
-  results/                           #   Human-readable result files
-  checkpoints/                       #   Multi-stage task checkpoints
+.praxis/queue/                       # Task queue directory (Phase J)
+  tasks.jsonl
+  results/
+  checkpoints/
 ```
 
 ---
@@ -94,12 +96,6 @@ tests/                               # 203 tests, all pass, all mocked
 - `python -m praxis --stop`: SIGTERM + clean PID file
 - `python -m praxis --status`: running/stopped + queue stats
 - `python -m praxis --queue`: foreground queue processing (no fork)
-- All modes coexist with existing `python -m praxis "prompt"` interactive mode
-
-### Updated `__main__.py`
-- `_parse_mode()` determines execution mode from argv flags
-- Interactive mode unchanged — still reads from argv or stdin
-- Four new modes: queue, daemon, stop, status
 
 ---
 
@@ -117,20 +113,18 @@ tests/                               # 203 tests, all pass, all mocked
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
 
-# Full test suite (203 tests):
+# Full test suite (205 tests):
 python -m pytest tests/ -v
 
 # Phase J tests only:
 python -m pytest tests/test_queue.py tests/test_checkpoint.py tests/test_queue_runner.py tests/test_daemon.py tests/test_main.py -v
 
-# Manual queue test (requires auth):
-echo '{"id":"test01","prompt":"echo hello","priority":0,"status":"pending","created_at":"2026-05-25T00:00:00Z"}' > .praxis/queue/tasks.jsonl
-python -m praxis --queue   # Ctrl+C to stop after task runs
-
-# Daemon lifecycle:
-python -m praxis --daemon
-python -m praxis --status
-python -m praxis --stop
+# Cloud runtime (Gemini):
+export PRAXIS_RUNTIME=cloud
+export PRAXIS_CLOUD_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+export PRAXIS_CLOUD_API_KEY=<your-google-ai-key>
+export PRAXIS_CLOUD_MODEL=gemini-2.5-flash
+python -m praxis "hello"
 ```
 
 ---
@@ -160,6 +154,28 @@ python -m praxis --stop
 | I-2 | OpenAICloudRuntime — cloud provider | 144 |
 | I-3 | LocalRuntime refactored to inherit base | 144 |
 | I-4 | Convergence routing for cloud runtime | 144 |
-| **J-1** | **Task queue (TaskQueue, tasks.jsonl, crash recovery)** | **174** |
-| **J-2** | **Session continuity (CheckpointStore, staged resume)** | **186** |
-| **J-3** | **Daemon entry point (start/stop/status + queue mode)** | **203** |
+| J-1 | Task queue (TaskQueue, tasks.jsonl, crash recovery) | 174 |
+| J-2 | Session continuity (CheckpointStore, staged resume) | 186 |
+| J-3 | Daemon entry point (start/stop/status + queue mode) | 203 |
+| **pipeline-validation** | **Gemini 2.5 Flash e2e validation + 3 pre-flight fixes + 2 code fixes** | **205** |
+
+---
+
+## 6. Pipeline validation (2026-05-25)
+
+Full Scout→Planner→Builder→Verifier pipeline ran against Gemini 2.5 Flash. Scribe stage exhausted free-tier RPM; reports written directly.
+
+### Pre-flight fixes (needed before pipeline could run)
+1. `cloud.py` — retry budget bumped 3/35s → 5/135s
+2. `cloud.py` — `_resolve_model()` added: Claude model IDs remapped to cloud default (subagent defs hardcode `claude-*`, Gemini 404s on them)
+3. `test_cloud_runtime.py` — test updated to assert correct (new) remap behavior; 3 new tests added
+
+### Code fixes from pipeline findings
+1. `checkpoint.py` — `CheckpointStore.save()` now atomic via `os.replace()` — no partial checkpoint files on crash
+2. `queue_runner.py` — `_run_atomic_task` docstring + `recover_interrupted` comment documenting SIGTERM by-design behavior
+
+### New gap found
+- `OpenAICloudRuntime._call_api()` does not retry 503 UNAVAILABLE — only retries 429. Gemini free tier returns 503 on transient overload. **Not yet fixed.** This is the top open item.
+
+### Verdict
+**CONDITIONALLY READY** for unattended overnight operation on paid-tier API. See `unattended-readiness.md` for full conditions.

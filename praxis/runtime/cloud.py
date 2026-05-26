@@ -19,8 +19,8 @@ from typing import Any
 
 from .openai_base import OpenAIBaseRuntime
 
-RATE_LIMIT_MAX_RETRIES = 3
-RATE_LIMIT_BASE_DELAY = 5   # seconds
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_BASE_DELAY = 5   # seconds — 5+10+20+40+60 = 135s total budget
 RATE_LIMIT_MAX_DELAY = 60   # seconds
 
 
@@ -59,36 +59,44 @@ class OpenAICloudRuntime(OpenAIBaseRuntime):
         client = openai.OpenAI(base_url=base_url, api_key=api_key)
         return cls(client, default_model=model, base_url=base_url)
 
-    def _call_api(self, **kwargs: Any) -> Any:
-        """Call the cloud API with exponential backoff on rate limits.
+    def _resolve_model(self, model: str) -> str:
+        """Replace Claude model IDs with the configured cloud model.
 
-        Retries up to RATE_LIMIT_MAX_RETRIES times on 429, with delays
-        of 5s, 10s, 20s (doubling, capped at 60s). Logs each retry to
-        stderr. Clean SystemExit after exhaustion.
+        Subagent definitions hardcode Claude model IDs (e.g. claude-haiku-*).
+        When routing through a non-Anthropic cloud endpoint those IDs are
+        meaningless — substitute the configured default instead.
+        """
+        if model.startswith("claude-"):
+            return self.default_model
+        return model
+
+    def _call_api(self, **kwargs: Any) -> Any:
+        """Call the cloud API with exponential backoff on rate limits and overload.
+
+        Retries up to RATE_LIMIT_MAX_RETRIES times on 429 (rate limit) or
+        503 (service unavailable / transient overload), with delays of
+        5s, 10s, 20s, 40s, 60s (doubling, capped at 60s). Logs each retry
+        to stderr. Clean SystemExit after exhaustion.
+
+        Gemini free tier returns 503 on transient overload, not 429 — both
+        are treated identically as retriable transient errors.
         """
         import openai
 
-        last_exc: Exception | None = None
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
                 return self.client.chat.completions.create(**kwargs)
             except openai.RateLimitError as exc:
-                last_exc = exc
-                if attempt >= RATE_LIMIT_MAX_RETRIES:
+                label = "rate limited"
+                retriable = True
+            except openai.APIStatusError as exc:
+                if exc.status_code == 503:
+                    label = "service unavailable (503)"
+                    retriable = True
+                else:
                     raise SystemExit(
-                        "[praxis] fatal: rate limited by cloud API after "
-                        f"{RATE_LIMIT_MAX_RETRIES} retries. Try again later."
+                        f"[praxis] fatal: cloud API error (HTTP {exc.status_code}) — {exc.message}"
                     )
-                delay = min(
-                    RATE_LIMIT_BASE_DELAY * (2 ** attempt),
-                    RATE_LIMIT_MAX_DELAY,
-                )
-                print(
-                    f"[praxis] cloud rate limited — retrying in {delay}s "
-                    f"(attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES})",
-                    file=sys.stderr,
-                )
-                time.sleep(delay)
             except openai.AuthenticationError:
                 raise SystemExit(
                     "[praxis] fatal: cloud API rejected authentication.\n"
@@ -99,7 +107,24 @@ class OpenAICloudRuntime(OpenAIBaseRuntime):
                     f"[praxis] fatal: cannot connect to cloud API at {self.base_url}.\n"
                     "Check your PRAXIS_CLOUD_BASE_URL."
                 )
-            except openai.APIStatusError as exc:
+            else:
+                retriable = False
+
+            if not retriable:
+                break
+
+            if attempt >= RATE_LIMIT_MAX_RETRIES:
                 raise SystemExit(
-                    f"[praxis] fatal: cloud API error (HTTP {exc.status_code}) — {exc.message}"
+                    f"[praxis] fatal: cloud API {label} after "
+                    f"{RATE_LIMIT_MAX_RETRIES} retries. Try again later."
                 )
+            delay = min(
+                RATE_LIMIT_BASE_DELAY * (2 ** attempt),
+                RATE_LIMIT_MAX_DELAY,
+            )
+            print(
+                f"[praxis] cloud {label} — retrying in {delay}s "
+                f"(attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES})",
+                file=sys.stderr,
+            )
+            time.sleep(delay)

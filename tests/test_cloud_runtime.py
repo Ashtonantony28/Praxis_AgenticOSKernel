@@ -218,13 +218,13 @@ def test_run_loop_with_tool_call():
     assert calls_log == [("Bash", {"command": "ls"})]
 
 
-def test_run_loop_no_model_remapping():
-    """Cloud runtime does NOT remap model IDs — passes them through."""
+def test_run_loop_remaps_claude_model():
+    """Cloud runtime remaps Claude model IDs to the configured default."""
     response = FakeCompletion(
         choices=[FakeChoice(message=FakeMessage(content="ok"))]
     )
     client = FakeOpenAIClient([response])
-    runtime = OpenAICloudRuntime(client, default_model="gpt-4o", base_url="https://api.openai.com/v1")
+    runtime = OpenAICloudRuntime(client, default_model="gemini-2.5-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
 
     runtime.run_loop(
         model="claude-sonnet-4-6",
@@ -233,8 +233,8 @@ def test_run_loop_no_model_remapping():
         tool_schemas=[],
         tool_executor=_noop_executor,
     )
-    # Cloud runtime passes through — no remapping
-    assert client.chat.completions.calls[0]["model"] == "claude-sonnet-4-6"
+    # Claude IDs are replaced with the cloud default (subagent defs hardcode claude-*)
+    assert client.chat.completions.calls[0]["model"] == "gemini-2.5-flash"
 
 
 # ---------- rate limit retry ----------
@@ -263,7 +263,7 @@ def test_rate_limit_retries_then_exits(mock_openai):
     assert mock_sleep.call_count == RATE_LIMIT_MAX_RETRIES
     # Verify exponential delays
     delays = [call.args[0] for call in mock_sleep.call_args_list]
-    assert delays == [5, 10, 20]
+    assert delays == [5, 10, 20, 40, 60]
 
 
 def test_rate_limit_retry_then_succeed(mock_openai):
@@ -297,6 +297,66 @@ def test_rate_limit_retry_then_succeed(mock_openai):
         )
     assert result == "recovered"
     assert call_count[0] == 3
+
+
+def test_503_retries_then_exits(mock_openai):
+    """Cloud runtime retries on 503 service unavailable then exits cleanly."""
+    err_503 = type("APIStatusError", (Exception,), {"status_code": 503, "message": "overloaded"})
+    client = MagicMock()
+    client.chat.completions.create.side_effect = err_503()
+
+    with patch.dict(sys.modules["openai"].__dict__ if "openai" in sys.modules else {}, {}):
+        # Patch APIStatusError on the mock_openai module so the handler sees 503
+        mock_openai.APIStatusError = err_503
+        runtime = OpenAICloudRuntime(
+            client, default_model="gpt-4o", base_url="https://api.openai.com/v1"
+        )
+
+        with patch("time.sleep") as mock_sleep:
+            with pytest.raises(SystemExit) as exc_info:
+                runtime.run_loop(
+                    model="gpt-4o",
+                    system="sys",
+                    user_message="hi",
+                    tool_schemas=[],
+                    tool_executor=_noop_executor,
+                )
+    assert "service unavailable" in str(exc_info.value)
+    assert mock_sleep.call_count == RATE_LIMIT_MAX_RETRIES
+
+
+def test_503_retry_then_succeed(mock_openai):
+    """Cloud runtime recovers after a 503 retry."""
+    err_503 = type("APIStatusError", (Exception,), {"status_code": 503, "message": "overloaded"})
+    mock_openai.APIStatusError = err_503
+
+    success_response = FakeCompletion(
+        choices=[FakeChoice(message=FakeMessage(content="recovered after 503"))]
+    )
+    call_count = {"n": 0}
+
+    def side_effect(**kwargs: Any) -> FakeCompletion:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise err_503()
+        return success_response
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = side_effect
+
+    runtime = OpenAICloudRuntime(
+        client, default_model="gpt-4o", base_url="https://api.openai.com/v1"
+    )
+
+    with patch("time.sleep"):
+        result = runtime.run_loop(
+            model="gpt-4o",
+            system="sys",
+            user_message="hi",
+            tool_schemas=[],
+            tool_executor=_noop_executor,
+        )
+    assert result == "recovered after 503"
 
 
 # ---------- error handling ----------
@@ -480,3 +540,18 @@ def test_convergence_env_var_override(monkeypatch, tmp_path):
 
     config = ConvergenceConfig.load(tmp_path)
     assert config.default_runtime == "cloud"
+
+
+def test_resolve_model_passthrough(mock_openai):
+    """Non-Claude model IDs are passed through unchanged."""
+    rt = OpenAICloudRuntime(mock_openai, default_model="gemini-2.5-flash", base_url="http://x")
+    assert rt._resolve_model("gemini-2.5-flash") == "gemini-2.5-flash"
+    assert rt._resolve_model("gpt-4o") == "gpt-4o"
+
+
+def test_resolve_model_substitutes_claude(mock_openai):
+    """Claude model IDs are replaced with the configured cloud default."""
+    rt = OpenAICloudRuntime(mock_openai, default_model="gemini-2.5-flash", base_url="http://x")
+    assert rt._resolve_model("claude-haiku-4-5-20251001") == "gemini-2.5-flash"
+    assert rt._resolve_model("claude-sonnet-4-6") == "gemini-2.5-flash"
+    assert rt._resolve_model("claude-opus-4-6") == "gemini-2.5-flash"

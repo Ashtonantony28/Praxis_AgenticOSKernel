@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,9 +71,11 @@ class CheckpointStore:
 
     def save(self, checkpoint: Checkpoint) -> None:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        self._path(checkpoint.task_id).write_text(
-            json.dumps(checkpoint.to_dict(), indent=2) + "\n"
-        )
+        import os
+        path = self._path(checkpoint.task_id)
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(checkpoint.to_dict(), indent=2) + "\n")
+        os.replace(temp_path, path)
 
     def remove(self, task_id: str) -> None:
         path = self._path(task_id)

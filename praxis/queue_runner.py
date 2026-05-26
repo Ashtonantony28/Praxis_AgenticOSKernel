@@ -63,7 +63,16 @@ def _run_single_task(task: Task, orch: Orchestrator, queue: TaskQueue, cp_store:
 
 
 def _run_atomic_task(task: Task, orch: Orchestrator, queue: TaskQueue) -> None:
-    """Run a task as a single orchestrator call."""
+    """Run a task as a single orchestrator call.
+
+    Atomic tasks are not interrupted by SIGTERM; they run to completion.
+    This means that if a SIGTERM is received during an atomic task, the task
+    will still attempt to complete. The `recover_interrupted` function
+    marks tasks as 'failed' if they were 'running' at the time of interruption.
+    It cannot distinguish between an atomic task that crashed and one that
+    completed successfully after SIGTERM but before the process exited.
+    This is by design for atomic tasks to ensure they finish their work.
+    """
     queue.update_status(task.id, "running")
     sys.stderr.write(f"[praxis] running task {task.id}: {task.prompt[:80]}\n")
     try:
@@ -131,7 +140,12 @@ def run_queue_loop(workspace: Path) -> None:
     queue.ensure_dirs()
     cp_store = CheckpointStore(queue_dir)
 
-    # Recover any tasks interrupted by a previous crash
+    # Recover any tasks interrupted by a previous crash.
+    # For atomic tasks, this means tasks that were 'running' when the queue runner
+    # was interrupted will be marked 'failed'. This is by design, as atomic tasks
+    # are expected to run to completion even if a SIGTERM is received.
+    # `recover_interrupted` cannot distinguish between a crashed atomic task and
+    # one that completed successfully after SIGTERM but before the process exited.
     recovered = queue.recover_interrupted()
     if recovered:
         sys.stderr.write(f"[praxis] recovered {recovered} interrupted task(s)\n")
