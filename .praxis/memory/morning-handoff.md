@@ -1,7 +1,7 @@
-# Morning handoff — Phase 4 Wave 2 complete
+# Morning handoff — Phase 4 Wave 3 complete
 
 **Date:** 2026-05-25  
-**Status:** Phase 4 Wave 2 (web research integration) complete. 290 tests pass.
+**Status:** Phase 4 Wave 3 (file management integration) complete. 326 tests pass.
 
 ---
 
@@ -13,7 +13,7 @@
 
 ```
 praxis-system-prompt.md              # the spec (§0–§11)
-CLAUDE.md                            # project conventions — updated Phase 4 Wave 2
+CLAUDE.md                            # project conventions — updated Phase 4 Wave 3
 pyproject.toml                       # deps: anthropic, pyyaml, openai[local], pytest
 
 praxis/                              # the orchestrator
@@ -35,7 +35,8 @@ praxis/                              # the orchestrator
     codebase.py                      #     coverage report, radon complexity, pylint lint
     testrunner.py                    #     pytest run + run_failed
     dependencies.py                  #     pip outdated + pip-audit vulnerability scan
-    web.py                           #     Web search (Brave API) + fetch with domain allowlisting — NEW (Wave 2)
+    web.py                           #     Web search (Brave API) + fetch with domain allowlisting (Wave 2)
+    files.py                         #     File management — search, summarize, git_status, disk_usage — NEW (Wave 3)
   runtime/                           #   Provider abstraction (Phase A + C + D + H + I)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime, OpenAICloudRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
@@ -44,7 +45,7 @@ praxis/                              # the orchestrator
     local.py                         #     Ollama/vLLM/llama.cpp — inherits OpenAIBaseRuntime
     cloud.py                         #     OpenAICloudRuntime — _resolve_model() added, retry 5/135s
 
-tests/                               # 290 tests, all pass, all mocked
+tests/                               # 326 tests, all pass, all mocked
   conftest.py
   test_config.py                     #   6 tests
   test_convergence.py                #   16 tests
@@ -60,16 +61,17 @@ tests/                               # 290 tests, all pass, all mocked
   test_checkpoint.py                 #   12 tests
   test_queue_runner.py               #   8 tests
   test_daemon.py                     #   10 tests
-  test_integrations.py               #   83 tests (54 Wave 1 + 29 Wave 2)
+  test_integrations.py               #   119 tests (54 Wave 1 + 29 Wave 2 + 36 Wave 3)
 
 .claude/agents/                      # 5 subagent definitions (builder, planner, scout, scribe, verifier)
-.claude/hooks/escalation-boundary.py # §5 hook (unchanged — see staging patch below)
+.claude/hooks/escalation-boundary.py # §5 hook (unchanged)
 .claude/settings.json                # hook wiring
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  phase4-wave2-survey.md             # Web search API survey (NEW)
-  phase4-wave2-plan.md               # Web integration design (NEW)
+  phase4-wave3-plan.md               # File management scope decision (NEW)
+  phase4-wave2-survey.md             # Web search API survey
+  phase4-wave2-plan.md               # Web integration design
   phase4-mcp-survey.md               # MCP server assessment
   phase4-wave1-plan.md               # Integration layer design
   pipeline-validation-report.md
@@ -81,7 +83,7 @@ tests/                               # 290 tests, all pass, all mocked
   phase-g-plan.md
 
 .praxis/staging/
-  escalation-boundary-patch.md       # Optional §5 hook patch for defense-in-depth (NEW)
+  escalation-boundary-patch.md       # Optional §5 hook patch for defense-in-depth
 
 .praxis/queue/                       # Task queue directory (Phase J)
   tasks.jsonl
@@ -91,51 +93,48 @@ tests/                               # 290 tests, all pass, all mocked
 
 ---
 
-## 2. What Phase 4 Wave 2 built
+## 2. What Phase 4 Wave 3 built
 
-### WebResearch integration (`web.py`)
+### FileManager integration (`files.py`)
 
-Single tool `WebResearch` with two actions:
-- **`search(query, n)`** — queries Brave Search API, returns numbered list of title/url/snippet
-- **`fetch(url, max_chars)`** — fetches a URL via `urllib.request`, strips HTML, returns clean text
+Single tool `FileManager` with four actions:
+
+- **`search(query, path?, glob?)`** — full-text search via `grep -rn` subprocess. Optional path scoping and glob filter. Output truncated to 100 lines.
+- **`summarize(path?)`** — file: line count, size, type, 20-line preview. Directory: file/dir count, total size, tree listing (depth 3, max 80 entries). All via stdlib `os.walk`/`os.stat`.
+- **`git_status()`** — current branch, uncommitted changes (porcelain), last 10 commits. Three sequential `git` subprocess calls. Fails cleanly if not a git repo.
+- **`disk_usage(path?)`** — `du -sh` for total, plus top-15 subdirectories sorted by size. Best-effort breakdown.
 
 Key design decisions:
-- **Brave Search API** as primary search provider — 2,000 free queries/month, no credit card, good quality
-- **Zero external dependencies** — uses `urllib.request` + `html.parser` (stdlib only)
-- **Domain allowlisting** — every HTTP request checked against `config.allowed_domains` (from `PRAXIS_ALLOWED_DOMAINS` env var). Unlisted domains are blocked.
-- **API key via env var** — `PRAXIS_WEB_SEARCH_API_KEY`, added to `_redact_secrets()` for output filtering
-- **Content truncation** — fetch output capped at `max_chars` (default 4000) to prevent context blowout
-- **Non-text rejection** — only `text/html`, `text/plain`, `application/json` content types accepted
+- **Boundary enforcement** — every path argument resolved against `config.workspace_root` via `_resolve_path()`. Attempts to escape return `"Error: path escapes workspace boundary"`. Absolute paths outside workspace also caught.
+- **Zero external dependencies** — uses `subprocess.run` for `grep`/`git`/`du` and stdlib `os` for summarize
+- **Output truncation** — search capped at 100 lines, tree at 80 entries, to prevent context blowout
+- **`watch` action deferred** — would require persistent background state (inotify/polling), daemon integration, thread management. High complexity, low MVP value. Cut from scope.
 
-### §5 boundary decision
+### Scope decision
 
-The §5 hook blocks `.claude/` edits (correctly). Rather than modifying the hook:
-- `WebResearch` is a custom Praxis integration tool — NOT in the hook's `NETWORK_TOOLS` set
-- Domain enforcement happens at the implementation level via `config.allowed_domains`
-- Same security guarantee: no HTTP request without domain in allowlist
-- Optional defense-in-depth hook patch written to `.praxis/staging/escalation-boundary-patch.md`
+Included: `search`, `summarize`, `git_status`, `disk_usage` — covers all three operating modes (Assistant, Workstation, Operator) with minimal complexity.
+
+Cut: `watch(path, pattern)` — persistent state requirement makes it unsuitable for a stateless integration module. Can be layered on via the daemon in a future wave.
 
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `praxis/integrations/web.py` | **NEW** — 239 lines, search + fetch + HTML stripping + domain validation |
-| `praxis/integrations/__init__.py` | Added web module import and aggregation |
-| `praxis/tools.py` | Added `PRAXIS_WEB_SEARCH_API_KEY` to `_redact_secrets()` |
-| `tests/test_integrations.py` | Added 29 tests (helpers, search, fetch, dispatch, redaction) |
-| `CLAUDE.md` | Added web integration docs + setup instructions |
-| `.praxis/staging/escalation-boundary-patch.md` | Optional hook patch for manual application |
+| `praxis/integrations/files.py` | **NEW** — 254 lines, 4 actions + path validation + human_size helper |
+| `praxis/integrations/__init__.py` | Added files module import and aggregation |
+| `tests/test_integrations.py` | Added 36 tests (paths, human_size, search, summarize, git_status, disk_usage, dispatch) |
+| `CLAUDE.md` | Added FileManager docs, updated test count and integration count |
 
 ---
 
 ## 3. What stayed the same
 
-- All 261 pre-existing tests pass unmodified
+- All 290 pre-existing tests pass unmodified
 - Interactive `python -m praxis "prompt"` works exactly as before
 - §5 hook enforcement unchanged (control plane protection intact)
 - Runtime, convergence, token propagation unchanged
 - Queue, checkpoint, daemon unchanged
-- Other integrations (GitHub, Analyze, TestRunner, Dependencies) unchanged
+- Other integrations (GitHub, Analyze, TestRunner, Dependencies, WebResearch) unchanged
 
 ---
 
@@ -144,20 +143,15 @@ The §5 hook blocks `.claude/` edits (correctly). Rather than modifying the hook
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
 
-# Full test suite (290 tests):
+# Full test suite (326 tests):
 python -m pytest tests/ -v
 
-# Web integration tests only:
-python -m pytest tests/test_integrations.py -v -k "WebResearch or web"
+# FileManager tests only:
+python -m pytest tests/test_integrations.py -v -k "FileManager"
 
 # Quick import check:
 python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(sorted(INTEGRATION_SCHEMAS.keys()))"
-# → ['Analyze', 'Dependencies', 'GitHub', 'TestRunner', 'WebResearch']
-
-# Live test (requires API key + domain allowlist):
-export PRAXIS_WEB_SEARCH_API_KEY=BSA...
-export PRAXIS_ALLOWED_DOMAINS=api.search.brave.com,docs.python.org
-python -m praxis "search for Python asyncio documentation"
+# → ['Analyze', 'Dependencies', 'FileManager', 'GitHub', 'TestRunner', 'WebResearch']
 ```
 
 ---
@@ -192,13 +186,14 @@ python -m praxis "search for Python asyncio documentation"
 | J-3 | Daemon entry point (start/stop/status + queue mode) | 203 |
 | pipeline-validation | Gemini 2.5 Flash e2e validation + fixes | 207 |
 | 4-W1 | Workstation integrations: GitHub, Analyze, TestRunner, Dependencies | 261 |
-| **4-W2** | **Web research: Brave Search API + fetch with domain allowlisting** | **290** |
+| 4-W2 | Web research: Brave Search API + fetch with domain allowlisting | 290 |
+| **4-W3** | **File management: search, summarize, git_status, disk_usage** | **326** |
 
 ---
 
-## 6. Wave 3 plan
+## 6. Wave 4 plan
 
-Phase 4 Wave 3 — file management integration:
-- **File watcher** — detect workspace changes and trigger re-analysis
-- **Git integration** — branch state, uncommitted changes, recent commits as tool
-- **Project context** — auto-detect project type (Python/Node/Rust), load conventions
+Phase 4 Wave 4 — notifications and communication:
+- **Notifications** — desktop notification on task completion (via `notify-send` or similar)
+- **Email** — send summary reports via SMTP (optional, env-var configured)
+- **Calendar** — read `.ics` files from workspace for deadline awareness

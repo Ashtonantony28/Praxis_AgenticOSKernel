@@ -27,6 +27,11 @@ from praxis.integrations.web import (
     _check_domain,
     BRAVE_API_DOMAIN,
 )
+from praxis.integrations.files import (
+    execute_filemanager,
+    _resolve_path,
+    _human_size,
+)
 
 
 @pytest.fixture
@@ -45,12 +50,14 @@ def config(tmp_path: Path) -> Config:
 class TestRegistry:
     def test_all_schemas_registered(self):
         assert set(INTEGRATION_SCHEMAS.keys()) == {
-            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch"
+            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch",
+            "FileManager",
         }
 
     def test_all_implementations_registered(self):
         assert set(INTEGRATION_IMPLEMENTATIONS.keys()) == {
-            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch"
+            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch",
+            "FileManager",
         }
 
     def test_schema_format(self):
@@ -63,7 +70,7 @@ class TestRegistry:
 
     def test_get_integration_schemas_all(self):
         schemas = get_integration_schemas()
-        assert len(schemas) == 5
+        assert len(schemas) == 6
 
     def test_get_integration_schemas_filtered(self):
         schemas = get_integration_schemas(["GitHub", "TestRunner"])
@@ -865,3 +872,315 @@ class TestSecretRedaction:
             )
             assert "BSAsecretkey123" not in result
             assert "[REDACTED]" in result
+
+
+# ---------- File manager — path validation ----------
+
+
+class TestFileManagerPaths:
+    def test_resolve_path_none_returns_root(self, config):
+        path, err = _resolve_path(None, config)
+        assert err is None
+        assert path == config.workspace_root
+
+    def test_resolve_path_relative(self, config):
+        path, err = _resolve_path("subdir/file.py", config)
+        assert err is None
+        assert str(path).startswith(str(config.workspace_root))
+
+    def test_resolve_path_escapes_boundary(self, config):
+        path, err = _resolve_path("../../etc/passwd", config)
+        assert err is not None
+        assert "escapes workspace boundary" in err
+
+    def test_resolve_path_absolute_escape(self, config):
+        # Even absolute paths that leave workspace are caught
+        path, err = _resolve_path("/etc/passwd", config)
+        assert err is not None
+        assert "escapes workspace boundary" in err
+
+
+class TestFileManagerHumanSize:
+    def test_bytes(self):
+        assert _human_size(42) == "42 B"
+
+    def test_zero(self):
+        assert _human_size(0) == "0 B"
+
+    def test_kilobytes(self):
+        result = _human_size(2048)
+        assert "KB" in result
+
+    def test_megabytes(self):
+        result = _human_size(5 * 1024 * 1024)
+        assert "MB" in result
+
+    def test_gigabytes(self):
+        result = _human_size(3 * 1024 * 1024 * 1024)
+        assert "GB" in result
+
+
+# ---------- File manager — search ----------
+
+
+class TestFileManagerSearch:
+    def test_search_missing_query(self, config):
+        result = execute_filemanager({"action": "search"}, config)
+        assert "'query' is required" in result
+
+    def test_search_path_escape(self, config):
+        result = execute_filemanager(
+            {"action": "search", "query": "test", "path": "../../etc"}, config
+        )
+        assert "escapes workspace boundary" in result
+
+    @patch("shutil.which", return_value=None)
+    def test_search_grep_not_found(self, mock_which, config):
+        result = execute_filemanager(
+            {"action": "search", "query": "test"}, config
+        )
+        assert "grep not found" in result
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_success(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="foo.py:1:def test_func():\nfoo.py:5:# test comment",
+            stderr="",
+        )
+        result = execute_filemanager(
+            {"action": "search", "query": "test"}, config
+        )
+        assert "test_func" in result
+        assert "test comment" in result
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_no_matches(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+        result = execute_filemanager(
+            {"action": "search", "query": "xyznonexistent"}, config
+        )
+        assert "No matches found" in result
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_with_glob(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        execute_filemanager(
+            {"action": "search", "query": "test", "glob": "*.py"}, config
+        )
+        cmd = mock_run.call_args[0][0]
+        assert "--include" in cmd
+        idx = cmd.index("--include")
+        assert cmd[idx + 1] == "*.py"
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_with_path(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        execute_filemanager(
+            {"action": "search", "query": "test", "path": "praxis/"}, config
+        )
+        cmd = mock_run.call_args[0][0]
+        assert str(config.workspace_root / "praxis") in cmd[-1]
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("grep", 30))
+    def test_search_timeout(self, mock_run, mock_which, config):
+        result = execute_filemanager(
+            {"action": "search", "query": "test"}, config
+        )
+        assert "timed out" in result
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_truncates_long_output(self, mock_run, mock_which, config):
+        long_output = "\n".join(f"file.py:{i}:match" for i in range(200))
+        mock_run.return_value = MagicMock(returncode=0, stdout=long_output, stderr="")
+        result = execute_filemanager(
+            {"action": "search", "query": "match"}, config
+        )
+        assert "truncated" in result
+
+    @patch("shutil.which", return_value="/usr/bin/grep")
+    @patch("subprocess.run")
+    def test_search_grep_error(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="bad pattern")
+        result = execute_filemanager(
+            {"action": "search", "query": "[invalid"}, config
+        )
+        assert "grep failed" in result
+
+
+# ---------- File manager — summarize ----------
+
+
+class TestFileManagerSummarize:
+    def test_summarize_file(self, config):
+        f = config.workspace_root / "hello.py"
+        f.write_text("print('hello')\nprint('world')\n")
+        result = execute_filemanager(
+            {"action": "summarize", "path": "hello.py"}, config
+        )
+        assert "hello.py" in result
+        assert "Lines: 2" in result
+        assert ".py" in result
+        assert "print('hello')" in result
+
+    def test_summarize_directory(self, config):
+        d = config.workspace_root / "mydir"
+        d.mkdir()
+        (d / "a.txt").write_text("aaa\n")
+        (d / "b.txt").write_text("bbb\n")
+        result = execute_filemanager(
+            {"action": "summarize", "path": "mydir"}, config
+        )
+        assert "mydir" in result
+        assert "Files: 2" in result
+
+    def test_summarize_nonexistent(self, config):
+        result = execute_filemanager(
+            {"action": "summarize", "path": "nope.txt"}, config
+        )
+        assert "does not exist" in result
+
+    def test_summarize_path_escape(self, config):
+        result = execute_filemanager(
+            {"action": "summarize", "path": "../../etc"}, config
+        )
+        assert "escapes workspace boundary" in result
+
+    def test_summarize_workspace_root(self, config):
+        (config.workspace_root / "f.txt").write_text("x\n")
+        result = execute_filemanager({"action": "summarize"}, config)
+        assert "Files:" in result
+
+    def test_summarize_binary_file(self, config):
+        f = config.workspace_root / "data.bin"
+        f.write_bytes(b"\x00\x01\x02\xff" * 100)
+        result = execute_filemanager(
+            {"action": "summarize", "path": "data.bin"}, config
+        )
+        assert "data.bin" in result
+        assert "Size:" in result
+
+    def test_summarize_large_file_preview_truncated(self, config):
+        f = config.workspace_root / "big.py"
+        f.write_text("\n".join(f"line {i}" for i in range(100)) + "\n")
+        result = execute_filemanager(
+            {"action": "summarize", "path": "big.py"}, config
+        )
+        assert "more lines" in result
+
+
+# ---------- File manager — git_status ----------
+
+
+class TestFileManagerGitStatus:
+    @patch("shutil.which", return_value=None)
+    def test_git_not_installed(self, mock_which, config):
+        result = execute_filemanager({"action": "git_status"}, config)
+        assert "git not installed" in result
+
+    @patch("shutil.which", return_value="/usr/bin/git")
+    @patch("subprocess.run")
+    def test_not_a_git_repo(self, mock_run, mock_which, config):
+        mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="")
+        result = execute_filemanager({"action": "git_status"}, config)
+        assert "not a git repository" in result
+
+    @patch("shutil.which", return_value="/usr/bin/git")
+    @patch("subprocess.run")
+    def test_git_status_success(self, mock_run, mock_which, config):
+        def side_effect(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0, stdout="true", stderr="")
+            elif "branch" in cmd:
+                return MagicMock(returncode=0, stdout="main\n", stderr="")
+            elif "status" in cmd:
+                return MagicMock(returncode=0, stdout=" M foo.py\n?? bar.py\n", stderr="")
+            elif "log" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout="abc1234 Fix bug\ndef5678 Add feature\n",
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        result = execute_filemanager({"action": "git_status"}, config)
+        assert "Branch: main" in result
+        assert "foo.py" in result
+        assert "bar.py" in result
+        assert "Fix bug" in result
+        assert "2 files" in result
+
+    @patch("shutil.which", return_value="/usr/bin/git")
+    @patch("subprocess.run")
+    def test_git_status_clean(self, mock_run, mock_which, config):
+        def side_effect(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0, stdout="true", stderr="")
+            elif "branch" in cmd:
+                return MagicMock(returncode=0, stdout="main\n", stderr="")
+            elif "status" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            elif "log" in cmd:
+                return MagicMock(returncode=0, stdout="abc1234 Init\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        result = execute_filemanager({"action": "git_status"}, config)
+        assert "Working tree clean" in result
+
+    @patch("shutil.which", return_value="/usr/bin/git")
+    @patch("subprocess.run")
+    def test_git_status_timeout(self, mock_run, mock_which, config):
+        mock_run.side_effect = subprocess.TimeoutExpired("git", 10)
+        result = execute_filemanager({"action": "git_status"}, config)
+        assert "timed out" in result
+
+
+# ---------- File manager — disk_usage ----------
+
+
+class TestFileManagerDiskUsage:
+    @patch("subprocess.run")
+    def test_disk_usage_success(self, mock_run, config):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="4.5M\t/workspace",
+            stderr="",
+        )
+        result = execute_filemanager({"action": "disk_usage"}, config)
+        assert "4.5M" in result
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("du", 30))
+    def test_disk_usage_timeout(self, mock_run, config):
+        result = execute_filemanager({"action": "disk_usage"}, config)
+        assert "timed out" in result
+
+    @patch("subprocess.run")
+    def test_disk_usage_error(self, mock_run, config):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="permission denied"
+        )
+        result = execute_filemanager({"action": "disk_usage"}, config)
+        assert "permission denied" in result
+
+    def test_disk_usage_path_escape(self, config):
+        result = execute_filemanager(
+            {"action": "disk_usage", "path": "../../etc"}, config
+        )
+        assert "escapes workspace boundary" in result
+
+
+# ---------- File manager — dispatch ----------
+
+
+class TestFileManagerDispatch:
+    def test_unknown_action(self, config):
+        result = execute_filemanager({"action": "bogus"}, config)
+        assert "unknown" in result

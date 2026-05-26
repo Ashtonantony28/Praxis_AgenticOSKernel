@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..config import Config
-from . import codebase, dependencies, github, testrunner, web
+from . import codebase, dependencies, files, github, testrunner, web
 
 # Aggregate all integration tool schemas and implementations
 INTEGRATION_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -14,6 +14,7 @@ INTEGRATION_SCHEMAS: dict[str, dict[str, Any]] = {
     **testrunner.SCHEMAS,
     **dependencies.SCHEMAS,
     **web.SCHEMAS,
+    **files.SCHEMAS,
 }
 
 INTEGRATION_IMPLEMENTATIONS: dict[str, Callable[[dict[str, Any], Config], str]] = {
@@ -22,6 +23,7 @@ INTEGRATION_IMPLEMENTATIONS: dict[str, Callable[[dict[str, Any], Config], str]] 
     **testrunner.IMPLEMENTATIONS,
     **dependencies.IMPLEMENTATIONS,
     **web.IMPLEMENTATIONS,
+    **files.IMPLEMENTATIONS,
 }
 
 
