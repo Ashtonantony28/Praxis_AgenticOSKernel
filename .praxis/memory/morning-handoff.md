@@ -1,7 +1,7 @@
-# Morning handoff — Phase 4 Wave 3 complete
+# Morning handoff — Phase 4 Wave 4 complete
 
-**Date:** 2026-05-25  
-**Status:** Phase 4 Wave 3 (file management integration) complete. 326 tests pass.
+**Date:** 2026-05-26  
+**Status:** Phase 4 Wave 4 (email and calendar integration) complete. 388 tests pass.
 
 ---
 
@@ -13,7 +13,7 @@
 
 ```
 praxis-system-prompt.md              # the spec (§0–§11)
-CLAUDE.md                            # project conventions — updated Phase 4 Wave 3
+CLAUDE.md                            # project conventions — updated Phase 4 Wave 4
 pyproject.toml                       # deps: anthropic, pyyaml, openai[local], pytest
 
 praxis/                              # the orchestrator
@@ -23,7 +23,7 @@ praxis/                              # the orchestrator
   convergence.py                     #   ConvergenceConfig.load() — multi-runtime routing (Phase D+I)
   subagents.py                       #   parse .claude/agents/*.md → SubagentDef
   hooks.py                           #   run_pretool_hook() — §5 enforcement
-  tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E, +GITHUB_TOKEN, +WEB_SEARCH_API_KEY)
+  tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E, +email/calendar secrets)
   orchestrator.py                    #   Orchestrator — merges integration tools into dispatch (Phase 4)
   queue.py                           #   TaskQueue — CRUD on tasks.jsonl (Phase J)
   checkpoint.py                      #   CheckpointStore — atomic writes via os.replace() (Phase J + fix)
@@ -36,7 +36,9 @@ praxis/                              # the orchestrator
     testrunner.py                    #     pytest run + run_failed
     dependencies.py                  #     pip outdated + pip-audit vulnerability scan
     web.py                           #     Web search (Brave API) + fetch with domain allowlisting (Wave 2)
-    files.py                         #     File management — search, summarize, git_status, disk_usage — NEW (Wave 3)
+    files.py                         #     File management — search, summarize, git_status, disk_usage (Wave 3)
+    email.py                         #     Email — IMAP read + local draft staging (Wave 4) — NEW
+    calendar.py                      #     Calendar — iCal feed read + event proposal staging (Wave 4) — NEW
   runtime/                           #   Provider abstraction (Phase A + C + D + H + I)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime, OpenAICloudRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
@@ -45,7 +47,7 @@ praxis/                              # the orchestrator
     local.py                         #     Ollama/vLLM/llama.cpp — inherits OpenAIBaseRuntime
     cloud.py                         #     OpenAICloudRuntime — _resolve_model() added, retry 5/135s
 
-tests/                               # 326 tests, all pass, all mocked
+tests/                               # 388 tests, all pass, all mocked
   conftest.py
   test_config.py                     #   6 tests
   test_convergence.py                #   16 tests
@@ -61,7 +63,7 @@ tests/                               # 326 tests, all pass, all mocked
   test_checkpoint.py                 #   12 tests
   test_queue_runner.py               #   8 tests
   test_daemon.py                     #   10 tests
-  test_integrations.py               #   119 tests (54 Wave 1 + 29 Wave 2 + 36 Wave 3)
+  test_integrations.py               #   182 tests (54 Wave 1 + 29 Wave 2 + 36 Wave 3 + 63 Wave 4)
 
 .claude/agents/                      # 5 subagent definitions (builder, planner, scout, scribe, verifier)
 .claude/hooks/escalation-boundary.py # §5 hook (unchanged)
@@ -69,7 +71,9 @@ tests/                               # 326 tests, all pass, all mocked
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  phase4-wave3-plan.md               # File management scope decision (NEW)
+  phase4-wave4-survey.md             # MCP/API survey — no stable MCP, IMAP+iCal chosen (NEW)
+  phase4-wave4-plan.md               # Read-safe/write-escalate design (NEW)
+  phase4-wave3-plan.md               # File management scope decision
   phase4-wave2-survey.md             # Web search API survey
   phase4-wave2-plan.md               # Web integration design
   phase4-mcp-survey.md               # MCP server assessment
@@ -84,6 +88,8 @@ tests/                               # 326 tests, all pass, all mocked
 
 .praxis/staging/
   escalation-boundary-patch.md       # Optional §5 hook patch for defense-in-depth
+  drafts/                            # Email drafts staged for human review (NEW)
+  events/                            # Calendar event proposals staged for human review (NEW)
 
 .praxis/queue/                       # Task queue directory (Phase J)
   tasks.jsonl
@@ -93,48 +99,71 @@ tests/                               # 326 tests, all pass, all mocked
 
 ---
 
-## 2. What Phase 4 Wave 3 built
+## 2. What Phase 4 Wave 4 built
 
-### FileManager integration (`files.py`)
+### Email integration (`email.py`)
 
-Single tool `FileManager` with four actions:
+Single tool `Email` with four actions, following the **read-safe / write-escalate** pattern:
 
-- **`search(query, path?, glob?)`** — full-text search via `grep -rn` subprocess. Optional path scoping and glob filter. Output truncated to 100 lines.
-- **`summarize(path?)`** — file: line count, size, type, 20-line preview. Directory: file/dir count, total size, tree listing (depth 3, max 80 entries). All via stdlib `os.walk`/`os.stat`.
-- **`git_status()`** — current branch, uncommitted changes (porcelain), last 10 commits. Three sequential `git` subprocess calls. Fails cleanly if not a git repo.
-- **`disk_usage(path?)`** — `du -sh` for total, plus top-15 subdirectories sorted by size. Best-effort breakdown.
+- **`list_emails(folder?, n?)`** — IMAP FETCH headers, readonly=True. Lists recent N emails (default 10, max 50). Newest first.
+- **`search_emails(query, folder?)`** — IMAP SEARCH. Bare text searches subject+sender; raw IMAP syntax (SINCE, FROM, UNSEEN, etc.) passes through unchanged.
+- **`read_email(message_id)`** — IMAP FETCH full message. Multipart-aware: prefers text/plain, notes text/html. Body truncated to 4000 chars.
+- **`draft_email(to, subject, body)`** — Composes `.eml` file, saves to `.praxis/staging/drafts/`. **NEVER sends.** User reviews and sends from their email client.
 
 Key design decisions:
-- **Boundary enforcement** — every path argument resolved against `config.workspace_root` via `_resolve_path()`. Attempts to escape return `"Error: path escapes workspace boundary"`. Absolute paths outside workspace also caught.
-- **Zero external dependencies** — uses `subprocess.run` for `grep`/`git`/`du` and stdlib `os` for summarize
-- **Output truncation** — search capped at 100 lines, tree at 80 entries, to prevent context blowout
-- **`watch` action deferred** — would require persistent background state (inotify/polling), daemon integration, thread management. High complexity, low MVP value. Cut from scope.
+- **IMAP via stdlib** — `imaplib` + `email` modules. Zero external dependencies. Works with Gmail (app passwords), Outlook, any IMAP-compatible server.
+- **App passwords** — `PRAXIS_EMAIL_PASSWORD` is an app-specific password, not the account password. Setup guidance in error messages.
+- **Credential protection** — `PRAXIS_EMAIL_PASSWORD` added to `_redact_secrets()`. Password never appears in tool output.
+- **No send action** — The tool API has no `send_email` action. Escalation is structural, not a runtime check.
 
-### Scope decision
+### Calendar integration (`calendar.py`)
 
-Included: `search`, `summarize`, `git_status`, `disk_usage` — covers all three operating modes (Assistant, Workstation, Operator) with minimal complexity.
+Single tool `Calendar` with four actions, same read-safe / write-escalate pattern:
 
-Cut: `watch(path, pattern)` — persistent state requirement makes it unsuitable for a stateless integration module. Can be layered on via the daemon in a future wave.
+- **`list_events(days?)`** — Fetches iCal feed, filters to next N days (default 7, max 30). Shows time, title, location.
+- **`today()`** — Today's agenda — events filtered to current date.
+- **`check_availability(date, start_time, end_time)`** — Overlap check against calendar events. Reports conflicts.
+- **`propose_event(title, date, start_time, end_time, description?)`** — Composes `.ics` file, saves to `.praxis/staging/events/`. **NEVER creates events.** User imports into their calendar manually.
+
+Key design decisions:
+- **iCal feed via stdlib** — `urllib.request` for fetch, custom `_parse_ical()` for parsing. Zero external dependencies. Works with Google Calendar, Outlook, Apple Calendar — any provider exposing iCal feeds.
+- **Domain enforcement** — Feed URL domain checked against `PRAXIS_ALLOWED_DOMAINS`, consistent with WebResearch pattern.
+- **Private feed URL** — `PRAXIS_CALENDAR_URL` contains an embedded auth token (e.g., Google's "Secret address in iCal format"). URL added to `_redact_secrets()`.
+- **No create action** — The tool API has no `create_event` action. Escalation is structural.
+- **iCal datetime handling** — Supports UTC (`Z` suffix), local time, all-day (`VALUE=DATE`), and timezone parameters (`TZID=...`).
+
+### Read-safe / write-escalate rule
+
+| Operation | Safety | Implementation |
+|-----------|--------|---------------|
+| list_emails, search_emails, read_email | Read-safe | IMAP readonly=True |
+| list_events, today, check_availability | Read-safe | HTTP GET + parse |
+| draft_email | Write-escalate | Local file → `.praxis/staging/drafts/` |
+| propose_event | Write-escalate | Local file → `.praxis/staging/events/` |
+
+No changes to `escalation-boundary.py` — the escalation is baked into the API surface. There is no code path that sends email or creates calendar events.
 
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `praxis/integrations/files.py` | **NEW** — 254 lines, 4 actions + path validation + human_size helper |
-| `praxis/integrations/__init__.py` | Added files module import and aggregation |
-| `tests/test_integrations.py` | Added 36 tests (paths, human_size, search, summarize, git_status, disk_usage, dispatch) |
-| `CLAUDE.md` | Added FileManager docs, updated test count and integration count |
+| `praxis/integrations/email.py` | **NEW** — ~250 lines, IMAP read + draft staging |
+| `praxis/integrations/calendar.py` | **NEW** — ~270 lines, iCal feed + event proposal |
+| `praxis/integrations/__init__.py` | Added email + calendar imports and aggregation |
+| `praxis/tools.py` | Added `PRAXIS_EMAIL_PASSWORD` + `PRAXIS_CALENDAR_URL` to `_redact_secrets()` |
+| `tests/test_integrations.py` | Added 62 tests (email: 31, calendar: 31) |
+| `CLAUDE.md` | Added Email + Calendar docs, read-safe/write-escalate pattern, updated test count |
 
 ---
 
 ## 3. What stayed the same
 
-- All 290 pre-existing tests pass unmodified
+- All 326 pre-existing tests pass unmodified
 - Interactive `python -m praxis "prompt"` works exactly as before
 - §5 hook enforcement unchanged (control plane protection intact)
 - Runtime, convergence, token propagation unchanged
 - Queue, checkpoint, daemon unchanged
-- Other integrations (GitHub, Analyze, TestRunner, Dependencies, WebResearch) unchanged
+- Other integrations (GitHub, Analyze, TestRunner, Dependencies, WebResearch, FileManager) unchanged
 
 ---
 
@@ -143,15 +172,18 @@ Cut: `watch(path, pattern)` — persistent state requirement makes it unsuitable
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
 
-# Full test suite (326 tests):
+# Full test suite (388 tests):
 python -m pytest tests/ -v
 
-# FileManager tests only:
-python -m pytest tests/test_integrations.py -v -k "FileManager"
+# Email tests only:
+python -m pytest tests/test_integrations.py -v -k "Email"
+
+# Calendar tests only:
+python -m pytest tests/test_integrations.py -v -k "Calendar"
 
 # Quick import check:
 python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(sorted(INTEGRATION_SCHEMAS.keys()))"
-# → ['Analyze', 'Dependencies', 'FileManager', 'GitHub', 'TestRunner', 'WebResearch']
+# → ['Analyze', 'Calendar', 'Dependencies', 'Email', 'FileManager', 'GitHub', 'TestRunner', 'WebResearch']
 ```
 
 ---
@@ -187,13 +219,17 @@ python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(sorted(INT
 | pipeline-validation | Gemini 2.5 Flash e2e validation + fixes | 207 |
 | 4-W1 | Workstation integrations: GitHub, Analyze, TestRunner, Dependencies | 261 |
 | 4-W2 | Web research: Brave Search API + fetch with domain allowlisting | 290 |
-| **4-W3** | **File management: search, summarize, git_status, disk_usage** | **326** |
+| 4-W3 | File management: search, summarize, git_status, disk_usage | 326 |
+| **4-W4** | **Email + Calendar: IMAP read, iCal feed, draft/propose staging** | **388** |
 
 ---
 
-## 6. Wave 4 plan
+## 6. What's next
 
-Phase 4 Wave 4 — notifications and communication:
-- **Notifications** — desktop notification on task completion (via `notify-send` or similar)
-- **Email** — send summary reports via SMTP (optional, env-var configured)
-- **Calendar** — read `.ics` files from workspace for deadline awareness
+Phase 4 complete. All eight workstation integrations are built:
+- GitHub, Analyze, TestRunner, Dependencies (Wave 1)
+- WebResearch (Wave 2)
+- FileManager (Wave 3)
+- Email, Calendar (Wave 4)
+
+Next milestone: open-source preparation — documentation, packaging, CI setup.

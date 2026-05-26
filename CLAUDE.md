@@ -24,6 +24,8 @@ praxis/                          # Python orchestrator package
     dependencies.py              #   pip outdated + pip-audit vulnerability check
     web.py                       #   Web search (Brave API) + page fetch with domain allowlisting
     files.py                     #   File management — search, summarize, git_status, disk_usage
+    email.py                     #   Email — IMAP inbox read + local draft staging (read-safe/write-escalate)
+    calendar.py                  #   Calendar — iCal feed read + local event proposal staging
   queue.py                       # TaskQueue — CRUD on .praxis/queue/tasks.jsonl (Phase J)
   checkpoint.py                  # CheckpointStore — multi-stage task resumption (Phase J)
   queue_runner.py                # Queue processing loop — polls tasks, runs through orchestrator (Phase J)
@@ -39,7 +41,7 @@ praxis/                          # Python orchestrator package
 .claude/agents/                  # Subagent definitions (builder, planner, scout, scribe, verifier)
 .claude/hooks/escalation-boundary.py  # §5 hook — blocks out-of-workspace writes, network egress
 .claude/settings.json            # Claude Code hook wiring
-tests/                           # pytest suite (326 tests, all mocked — no real API calls)
+tests/                           # pytest suite (388 tests, all mocked — no real API calls)
 .praxis/memory/                  # Durable memory across sessions
 .praxis/queue/                   # Task queue directory (Phase J)
   tasks.jsonl                    #   One JSON task object per line
@@ -81,6 +83,15 @@ python -m praxis "your message"
 export PRAXIS_WEB_SEARCH_API_KEY=BSA...           # from https://brave.com/search/api/
 export PRAXIS_ALLOWED_DOMAINS=api.search.brave.com,docs.python.org  # allowlisted domains
 
+# Email (IMAP read — any provider with app passwords)
+export PRAXIS_EMAIL_IMAP_HOST=imap.gmail.com       # or outlook.office365.com
+export PRAXIS_EMAIL_USER=you@gmail.com
+export PRAXIS_EMAIL_PASSWORD=xxxx-xxxx-xxxx-xxxx   # app password, NOT account password
+
+# Calendar (iCal feed — read-only)
+export PRAXIS_CALENDAR_URL=https://calendar.google.com/.../basic.ics  # private feed URL
+export PRAXIS_ALLOWED_DOMAINS=...,calendar.google.com  # add calendar domain
+
 # Unattended queue mode — process tasks from .praxis/queue/tasks.jsonl
 python -m praxis --queue
 
@@ -120,7 +131,7 @@ python -m pytest tests/ -v
 - **Checkpoints.** Multi-stage tasks (those with `stages` list) get checkpointed to `.praxis/queue/checkpoints/{task-id}.json` after each stage completes. On restart, incomplete staged tasks resume from the last completed stage instead of restarting from scratch. Checkpoint is deleted after all stages complete.
 - **Queue runner.** `run_queue_loop()` polls `tasks.jsonl` every 2s (configurable via `PRAXIS_QUEUE_POLL_INTERVAL`). Handles SIGTERM gracefully — finishes current task stage, then exits. Atomic tasks run as a single `orch.run()` call; staged tasks run each stage as a separate `orch.run()` call with checkpoint between.
 - **Daemon.** `python -m praxis --daemon` forks to background via `os.fork()`, writes PID to `.praxis/praxis.pid`, logs to `.praxis/logs/praxis.log`. `--stop` sends SIGTERM. `--status` reports running state + queue stats. No log rotation (out of scope).
-- **Workstation integrations.** Six subprocess-backed tools in `praxis/integrations/`:
+- **Workstation integrations.** Eight tools in `praxis/integrations/`:
   - `GitHub` — wraps `gh` CLI. Actions: `pr_list`, `pr_view`, `issue_list`, `issue_view`, `pr_diff`. Requires `gh` installed and authenticated. Auth via `GITHUB_TOKEN` env var (read by `gh` automatically).
   - `Analyze` — wraps `coverage`, `radon`, `pylint`. Actions: `coverage`, `complexity`, `lint`. Each tool checked independently — clear error if not installed.
   - `TestRunner` — wraps `pytest`. Actions: `run` (with optional path/marker/keyword), `run_failed` (re-run last failures).
@@ -130,4 +141,10 @@ python -m pytest tests/ -v
   
   - `FileManager` — file management scoped to `WORKSPACE_ROOT`. Actions: `search` (full-text grep across workspace, with optional path and glob filter), `summarize` (file or directory overview — line count, size, preview/tree), `git_status` (current branch, uncommitted changes, recent commits), `disk_usage` (size breakdown by directory). Uses `subprocess.run` for `grep`/`git`/`du` and stdlib `os.walk`/`os.stat` for summarize. All path arguments are resolved against workspace root — attempts to escape the boundary return a clean error. No external dependencies. Output truncated to prevent context blowout (search: 100 lines, tree: 80 entries).
   
-  All integrations use `subprocess.run` (or `urllib.request` for web) with `_subprocess_env()` for token propagation and `_redact_secrets()` for output filtering (including `GITHUB_TOKEN`, `PRAXIS_WEB_SEARCH_API_KEY`). Each fails loudly with install/config instructions if the required CLI tool or API key is missing. Integration tools are registered in the orchestrator alongside core tools — subagents can call them if their tool list includes the tool name. No credentials stored in code or logs.
+  - `Email` — IMAP inbox read + local draft staging. **Read-safe/write-escalate pattern.** Actions: `list_emails` (list recent, readonly), `search_emails` (IMAP search, readonly), `read_email` (fetch full message, readonly), `draft_email` (compose locally → save to `.praxis/staging/drafts/*.eml` — NEVER sends). Uses stdlib `imaplib` + `email` — zero external dependencies. Auth via `PRAXIS_EMAIL_IMAP_HOST`, `PRAXIS_EMAIL_USER`, `PRAXIS_EMAIL_PASSWORD` (app password). Password added to `_redact_secrets()`. Works with Gmail (app passwords), Outlook, any IMAP-compatible server.
+  
+  - `Calendar` — iCal feed read + local event proposal staging. **Read-safe/write-escalate pattern.** Actions: `list_events` (upcoming N days), `today` (today's agenda), `check_availability` (overlap check), `propose_event` (compose locally → save to `.praxis/staging/events/*.ics` — NEVER creates events). Uses stdlib `urllib.request` to fetch iCal feeds + custom parser. Feed URL domain checked against `PRAXIS_ALLOWED_DOMAINS` (consistent with WebResearch). Auth via `PRAXIS_CALENDAR_URL` (private iCal feed URL with embedded auth). URL added to `_redact_secrets()`. Works with Google Calendar, Outlook, Apple Calendar — any provider exposing iCal feeds.
+  
+  All integrations use `subprocess.run` (or `urllib.request`/`imaplib` for network) with `_subprocess_env()` for token propagation and `_redact_secrets()` for output filtering (including `GITHUB_TOKEN`, `PRAXIS_WEB_SEARCH_API_KEY`, `PRAXIS_EMAIL_PASSWORD`, `PRAXIS_CALENDAR_URL`). Each fails loudly with install/config instructions if the required CLI tool or API key is missing. Integration tools are registered in the orchestrator alongside core tools — subagents can call them if their tool list includes the tool name. No credentials stored in code or logs.
+  
+  **Read-safe / write-escalate rule (Email + Calendar).** Read operations (list, search, read, availability) run autonomously. Write operations have no autonomous execution path — `draft_email` and `propose_event` compose content locally and save to `.praxis/staging/` for human review. There is no `send_email` or `create_event` action. The escalation is structural — baked into the API surface, not enforced by a runtime check. This satisfies §5 without requiring changes to `escalation-boundary.py`.

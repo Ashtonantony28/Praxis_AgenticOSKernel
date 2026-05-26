@@ -24,7 +24,10 @@ def _subprocess_env(config: Config) -> dict[str, str]:
 
 def _redact_secrets(text: str) -> str:
     """Strip auth tokens from subprocess output (§5.8 secret filtering)."""
-    for var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "PRAXIS_WEB_SEARCH_API_KEY"):
+    for var in (
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+        "PRAXIS_WEB_SEARCH_API_KEY", "PRAXIS_EMAIL_PASSWORD", "PRAXIS_CALENDAR_URL",
+    ):
         val = os.environ.get(var)
         if val and val in text:
             text = text.replace(val, "[REDACTED]")

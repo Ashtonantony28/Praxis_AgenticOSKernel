@@ -32,6 +32,16 @@ from praxis.integrations.files import (
     _resolve_path,
     _human_size,
 )
+from praxis.integrations.email import (
+    execute_email,
+    _parse_headers,
+    _extract_body,
+)
+from praxis.integrations.calendar import (
+    execute_calendar,
+    _parse_ical,
+    _parse_ical_datetime,
+)
 
 
 @pytest.fixture
@@ -51,13 +61,13 @@ class TestRegistry:
     def test_all_schemas_registered(self):
         assert set(INTEGRATION_SCHEMAS.keys()) == {
             "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch",
-            "FileManager",
+            "FileManager", "Email", "Calendar",
         }
 
     def test_all_implementations_registered(self):
         assert set(INTEGRATION_IMPLEMENTATIONS.keys()) == {
             "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch",
-            "FileManager",
+            "FileManager", "Email", "Calendar",
         }
 
     def test_schema_format(self):
@@ -70,7 +80,7 @@ class TestRegistry:
 
     def test_get_integration_schemas_all(self):
         schemas = get_integration_schemas()
-        assert len(schemas) == 6
+        assert len(schemas) == 8
 
     def test_get_integration_schemas_filtered(self):
         schemas = get_integration_schemas(["GitHub", "TestRunner"])
@@ -1184,3 +1194,1006 @@ class TestFileManagerDispatch:
     def test_unknown_action(self, config):
         result = execute_filemanager({"action": "bogus"}, config)
         assert "unknown" in result
+
+
+# ========== Email integration ==========
+
+
+# ---------- Email — helpers ----------
+
+
+class TestEmailParseHeaders:
+    def test_basic_headers(self):
+        raw = (
+            b"From: alice@example.com\r\n"
+            b"To: bob@example.com\r\n"
+            b"Subject: Hello\r\n"
+            b"Date: Mon, 25 May 2026 10:00:00 +0000\r\n"
+            b"\r\n"
+            b"Body text\r\n"
+        )
+        hdrs = _parse_headers(raw)
+        assert hdrs["from"] == "alice@example.com"
+        assert hdrs["to"] == "bob@example.com"
+        assert hdrs["subject"] == "Hello"
+        assert "2026" in hdrs["date"]
+
+    def test_missing_headers(self):
+        raw = b"\r\nJust a body\r\n"
+        hdrs = _parse_headers(raw)
+        assert hdrs["from"] == "(unknown)"
+        assert hdrs["subject"] == "(no subject)"
+
+    def test_malformed_date(self):
+        raw = b"Date: not-a-date\r\n\r\n"
+        hdrs = _parse_headers(raw)
+        # Should not crash — falls back to raw string
+        assert isinstance(hdrs["date"], str)
+
+
+class TestEmailExtractBody:
+    def test_plain_text(self):
+        raw = (
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"Hello world\r\n"
+        )
+        body = _extract_body(raw)
+        assert "Hello world" in body
+
+    def test_multipart_prefers_plain(self):
+        raw = (
+            b"MIME-Version: 1.0\r\n"
+            b"Content-Type: multipart/alternative; boundary=boundary\r\n"
+            b"\r\n"
+            b"--boundary\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"Plain text body\r\n"
+            b"--boundary\r\n"
+            b"Content-Type: text/html\r\n"
+            b"\r\n"
+            b"<p>HTML body</p>\r\n"
+            b"--boundary--\r\n"
+        )
+        body = _extract_body(raw)
+        assert "Plain text body" in body
+        assert "<p>" not in body
+
+    def test_html_only_multipart(self):
+        raw = (
+            b"MIME-Version: 1.0\r\n"
+            b"Content-Type: multipart/alternative; boundary=b\r\n"
+            b"\r\n"
+            b"--b\r\n"
+            b"Content-Type: text/html\r\n"
+            b"\r\n"
+            b"<p>Only HTML</p>\r\n"
+            b"--b--\r\n"
+        )
+        body = _extract_body(raw)
+        assert "HTML content" in body
+
+    def test_empty_message(self):
+        raw = b"Content-Type: text/plain\r\n\r\n"
+        body = _extract_body(raw)
+        assert "Empty message" in body
+
+
+# ---------- Email — config errors ----------
+
+
+class TestEmailConfig:
+    def test_missing_host(self, config, monkeypatch):
+        monkeypatch.delenv("PRAXIS_EMAIL_IMAP_HOST", raising=False)
+        result = execute_email({"action": "list_emails"}, config)
+        assert "PRAXIS_EMAIL_IMAP_HOST not set" in result
+        assert "imap.gmail.com" in result
+
+    def test_missing_user(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.delenv("PRAXIS_EMAIL_USER", raising=False)
+        result = execute_email({"action": "list_emails"}, config)
+        assert "PRAXIS_EMAIL_USER not set" in result
+
+    def test_missing_password(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.delenv("PRAXIS_EMAIL_PASSWORD", raising=False)
+        result = execute_email({"action": "list_emails"}, config)
+        assert "PRAXIS_EMAIL_PASSWORD not set" in result
+        assert "app password" in result
+
+
+# ---------- Email — IMAP connection ----------
+
+
+class TestEmailConnection:
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_auth_failure(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "bad-password")
+
+        import imaplib as imap_mod
+        mock_imap.return_value.login.side_effect = imap_mod.IMAP4.error("LOGIN failed")
+
+        result = execute_email({"action": "list_emails"}, config)
+        assert "authentication failed" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_connection_error(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        mock_imap.side_effect = OSError("Connection refused")
+
+        result = execute_email({"action": "list_emails"}, config)
+        assert "could not connect" in result
+
+
+# ---------- Email — list ----------
+
+
+class TestEmailList:
+    def _setup_imap(self, mock_imap, emails):
+        """Set up mock IMAP with a list of (id, header_bytes) tuples."""
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+
+        all_ids = b" ".join(eid.encode() for eid, _ in emails)
+        conn.search.return_value = ("OK", [all_ids])
+
+        def fetch_side_effect(mid, parts):
+            mid_str = mid.decode() if isinstance(mid, bytes) else mid
+            for eid, raw in emails:
+                if eid == mid_str:
+                    return ("OK", [(b"1 RFC822.HEADER", raw)])
+            return ("OK", [None])
+
+        conn.fetch.side_effect = fetch_side_effect
+        return conn
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_list_success(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        self._setup_imap(mock_imap, [
+            ("1", b"From: alice@ex.com\r\nSubject: First\r\nDate: Mon, 25 May 2026 10:00:00 +0000\r\n\r\n"),
+            ("2", b"From: bob@ex.com\r\nSubject: Second\r\nDate: Mon, 25 May 2026 11:00:00 +0000\r\n\r\n"),
+        ])
+
+        result = execute_email({"action": "list_emails", "n": 5}, config)
+        assert "INBOX" in result
+        assert "2 total" in result
+        assert "First" in result
+        assert "Second" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_list_empty_folder(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+        conn.search.return_value = ("OK", [b""])
+
+        result = execute_email({"action": "list_emails"}, config)
+        assert "No emails" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_list_bad_folder(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("NO", [b"Folder not found"])
+
+        result = execute_email({"action": "list_emails", "folder": "BadFolder"}, config)
+        assert "could not open folder" in result
+
+
+# ---------- Email — search ----------
+
+
+class TestEmailSearch:
+    def test_missing_query(self, config):
+        result = execute_email({"action": "search_emails"}, config)
+        assert "'query' is required" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_search_success(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+        conn.search.return_value = ("OK", [b"5 10"])
+        conn.fetch.return_value = (
+            "OK",
+            [(b"1 RFC822.HEADER", b"From: sender@ex.com\r\nSubject: Match\r\nDate: Mon, 25 May 2026 10:00:00 +0000\r\n\r\n")],
+        )
+
+        result = execute_email(
+            {"action": "search_emails", "query": "Match"}, config
+        )
+        assert "2 email(s)" in result
+        assert "Match" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_search_no_results(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+        conn.search.return_value = ("OK", [b""])
+
+        result = execute_email(
+            {"action": "search_emails", "query": "nonexistent"}, config
+        )
+        assert "No emails matching" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_search_raw_imap_syntax(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+        conn.search.return_value = ("OK", [b"1"])
+        conn.fetch.return_value = (
+            "OK",
+            [(b"1 RFC822.HEADER", b"From: a@b.com\r\nSubject: S\r\n\r\n")],
+        )
+
+        # Raw IMAP syntax should pass through
+        execute_email(
+            {"action": "search_emails", "query": "SINCE 01-Jan-2026"}, config
+        )
+        # Verify the raw criteria was passed to IMAP search
+        conn.search.assert_called_with(None, "SINCE 01-Jan-2026")
+
+
+# ---------- Email — read ----------
+
+
+class TestEmailRead:
+    def test_missing_message_id(self, config):
+        result = execute_email({"action": "read_email"}, config)
+        assert "'message_id' is required" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_read_success(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+
+        raw_email = (
+            b"From: alice@ex.com\r\n"
+            b"To: bob@ex.com\r\n"
+            b"Subject: Test email\r\n"
+            b"Date: Mon, 25 May 2026 10:00:00 +0000\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"This is the body.\r\n"
+        )
+        conn.fetch.return_value = ("OK", [(b"1 RFC822", raw_email)])
+
+        result = execute_email(
+            {"action": "read_email", "message_id": "1"}, config
+        )
+        assert "alice@ex.com" in result
+        assert "Test email" in result
+        assert "This is the body" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_read_not_found(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+        conn.fetch.return_value = ("NO", [None])
+
+        result = execute_email(
+            {"action": "read_email", "message_id": "999"}, config
+        )
+        assert "could not fetch" in result
+
+    @patch("praxis.integrations.email.imaplib.IMAP4_SSL")
+    def test_read_truncates_long_body(self, mock_imap, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "pass")
+
+        conn = MagicMock()
+        mock_imap.return_value = conn
+        conn.login.return_value = ("OK", [])
+        conn.select.return_value = ("OK", [b"EXISTS"])
+
+        long_body = b"x" * 10000
+        raw_email = (
+            b"From: a@b.com\r\n"
+            b"Subject: Long\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n" + long_body
+        )
+        conn.fetch.return_value = ("OK", [(b"1 RFC822", raw_email)])
+
+        result = execute_email(
+            {"action": "read_email", "message_id": "1"}, config
+        )
+        assert "more characters" in result
+
+
+# ---------- Email — draft ----------
+
+
+class TestEmailDraft:
+    def test_draft_missing_to(self, config):
+        result = execute_email(
+            {"action": "draft_email", "subject": "S", "body": "B"}, config
+        )
+        assert "'to' is required" in result
+
+    def test_draft_missing_subject(self, config):
+        result = execute_email(
+            {"action": "draft_email", "to": "a@b.com", "body": "B"}, config
+        )
+        assert "'subject' is required" in result
+
+    def test_draft_missing_body(self, config):
+        result = execute_email(
+            {"action": "draft_email", "to": "a@b.com", "subject": "S"}, config
+        )
+        assert "'body' is required" in result
+
+    def test_draft_creates_file(self, config):
+        result = execute_email(
+            {
+                "action": "draft_email",
+                "to": "recipient@example.com",
+                "subject": "Test Draft",
+                "body": "Hello from Praxis",
+            },
+            config,
+        )
+        assert "Draft saved to" in result
+        assert "NOT been sent" in result
+        assert "recipient@example.com" in result
+        assert "Test Draft" in result
+
+        # Verify file was created
+        drafts = list(
+            (config.workspace_root / ".praxis" / "staging" / "drafts").glob("*.eml")
+        )
+        assert len(drafts) == 1
+        content = drafts[0].read_text()
+        assert "To: recipient@example.com" in content
+        assert "Subject: Test Draft" in content
+        assert "Hello from Praxis" in content
+
+    def test_draft_sanitizes_filename(self, config):
+        execute_email(
+            {
+                "action": "draft_email",
+                "to": "a@b.com",
+                "subject": "Has/Bad<Chars>!",
+                "body": "body",
+            },
+            config,
+        )
+        drafts = list(
+            (config.workspace_root / ".praxis" / "staging" / "drafts").glob("*.eml")
+        )
+        assert len(drafts) == 1
+        assert "/" not in drafts[0].name
+        assert "<" not in drafts[0].name
+
+
+# ---------- Email — dispatch ----------
+
+
+class TestEmailDispatch:
+    def test_unknown_action(self, config):
+        result = execute_email({"action": "bogus"}, config)
+        assert "unknown" in result
+
+
+# ---------- Email — secret redaction ----------
+
+
+class TestEmailSecretRedaction:
+    def test_password_redacted(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_EMAIL_PASSWORD", "secret-app-password-123")
+        monkeypatch.setenv("PRAXIS_EMAIL_IMAP_HOST", "imap.example.com")
+        monkeypatch.setenv("PRAXIS_EMAIL_USER", "user@example.com")
+
+        with patch("praxis.integrations.email.imaplib.IMAP4_SSL") as mock_imap:
+            conn = MagicMock()
+            mock_imap.return_value = conn
+            conn.login.return_value = ("OK", [])
+            conn.select.return_value = ("OK", [b"EXISTS"])
+            conn.search.return_value = ("OK", [b"1"])
+            conn.fetch.return_value = (
+                "OK",
+                [(b"1 RFC822.HEADER",
+                  b"From: a@b.com\r\nSubject: secret-app-password-123 leaked\r\n\r\n")],
+            )
+
+            result = execute_email({"action": "list_emails"}, config)
+            assert "secret-app-password-123" not in result
+            assert "[REDACTED]" in result
+
+
+# ========== Calendar integration ==========
+
+
+# ---------- Calendar — iCal parsing ----------
+
+SAMPLE_ICAL = """\
+BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+DTSTART:20260525T100000Z
+DTEND:20260525T110000Z
+SUMMARY:Team standup
+LOCATION:Zoom
+DESCRIPTION:Daily standup meeting
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20260526T140000
+DTEND:20260526T150000
+SUMMARY:Code review
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:20260527
+SUMMARY:All-day event
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+class TestICalParsing:
+    def test_parse_events(self):
+        events = _parse_ical(SAMPLE_ICAL)
+        assert len(events) == 3
+        assert events[0].summary == "Team standup"
+        assert events[0].location == "Zoom"
+        assert events[0].description == "Daily standup meeting"
+
+    def test_parse_utc_datetime(self):
+        dt = _parse_ical_datetime("DTSTART:20260525T100000Z")
+        assert dt is not None
+        assert dt.year == 2026
+        assert dt.month == 5
+        assert dt.hour == 10
+
+    def test_parse_local_datetime(self):
+        dt = _parse_ical_datetime("DTSTART:20260525T100000")
+        assert dt is not None
+        assert dt.hour == 10
+
+    def test_parse_date_only(self):
+        dt = _parse_ical_datetime("DTSTART;VALUE=DATE:20260525")
+        assert dt is not None
+        assert dt.year == 2026
+        assert dt.hour == 0
+
+    def test_parse_with_tzid(self):
+        dt = _parse_ical_datetime("DTSTART;TZID=America/New_York:20260525T100000")
+        assert dt is not None
+        assert dt.hour == 10
+
+    def test_parse_invalid(self):
+        dt = _parse_ical_datetime("DTSTART:not-a-date")
+        assert dt is None
+
+    def test_parse_empty_calendar(self):
+        events = _parse_ical("BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+        assert events == []
+
+    def test_parse_event_without_dtstart_skipped(self):
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            "SUMMARY:No date\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        events = _parse_ical(ical)
+        assert len(events) == 0
+
+    def test_parse_summary_with_params(self):
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            "DTSTART:20260525T100000Z\n"
+            "SUMMARY;LANGUAGE=en:Parameterized title\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        events = _parse_ical(ical)
+        assert len(events) == 1
+        assert events[0].summary == "Parameterized title"
+
+    def test_events_sorted_by_start(self):
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\nDTSTART:20260526T100000Z\nSUMMARY:Later\nEND:VEVENT\n"
+            "BEGIN:VEVENT\nDTSTART:20260525T100000Z\nSUMMARY:Earlier\nEND:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        events = _parse_ical(ical)
+        assert events[0].summary == "Earlier"
+        assert events[1].summary == "Later"
+
+
+# ---------- Calendar — config errors ----------
+
+
+class TestCalendarConfig:
+    def test_missing_url(self, config, monkeypatch):
+        monkeypatch.delenv("PRAXIS_CALENDAR_URL", raising=False)
+        result = execute_calendar({"action": "list_events"}, config)
+        assert "PRAXIS_CALENDAR_URL not set" in result
+
+    def test_bad_scheme(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_CALENDAR_URL", "ftp://cal.example.com/feed.ics")
+        result = execute_calendar({"action": "list_events"}, config)
+        assert "http://" in result or "https://" in result
+
+    def test_domain_not_allowed(self, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL",
+            "https://calendar.google.com/feed.ics",
+        )
+        result = execute_calendar({"action": "list_events"}, config)
+        assert "not in PRAXIS_ALLOWED_DOMAINS" in result
+
+
+# ---------- Calendar — feed fetch errors ----------
+
+
+class TestCalendarFetchErrors:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_http_error(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://cal.example.com/feed.ics", 403, "Forbidden", {}, None
+        )
+        result = execute_calendar({"action": "list_events"}, cfg)
+        assert "403" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_url_error(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        mock_urlopen.side_effect = urllib.error.URLError("DNS failed")
+        result = execute_calendar({"action": "list_events"}, cfg)
+        assert "could not fetch" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_timeout(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        mock_urlopen.side_effect = TimeoutError()
+        result = execute_calendar({"action": "list_events"}, cfg)
+        assert "timed out" in result
+
+
+# ---------- Calendar — list_events ----------
+
+
+class TestCalendarListEvents:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    def _mock_feed(self, mock_urlopen, ical_text):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = ical_text.encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_list_events_success(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+
+        # Create event in near future
+        from datetime import datetime, timedelta
+        tomorrow = datetime.now() + timedelta(days=1)
+        dt_str = tomorrow.strftime("%Y%m%dT%H%M%S")
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            f"DTSTART:{dt_str}\n"
+            f"DTEND:{dt_str}\n"
+            "SUMMARY:Upcoming meeting\n"
+            "LOCATION:Room 42\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        self._mock_feed(mock_urlopen, ical)
+
+        result = execute_calendar({"action": "list_events", "days": 7}, cfg)
+        assert "Upcoming meeting" in result
+        assert "1 total" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_list_events_empty(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        self._mock_feed(mock_urlopen, "BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+
+        result = execute_calendar({"action": "list_events"}, cfg)
+        assert "No events" in result
+
+
+# ---------- Calendar — today ----------
+
+
+class TestCalendarToday:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    def _mock_feed(self, mock_urlopen, ical_text):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = ical_text.encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_today_with_events(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+
+        from datetime import datetime
+        now = datetime.now()
+        dt_str = now.strftime("%Y%m%dT") + "180000"
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            f"DTSTART:{dt_str}\n"
+            f"DTEND:{dt_str}\n"
+            "SUMMARY:Evening standup\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        self._mock_feed(mock_urlopen, ical)
+
+        result = execute_calendar({"action": "today"}, cfg)
+        assert "Evening standup" in result
+        assert "1 event(s)" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_today_empty(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        self._mock_feed(mock_urlopen, "BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+
+        result = execute_calendar({"action": "today"}, cfg)
+        assert "No events today" in result
+
+
+# ---------- Calendar — check_availability ----------
+
+
+class TestCalendarAvailability:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    def _mock_feed(self, mock_urlopen, ical_text):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = ical_text.encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+    def test_missing_fields(self, config):
+        result = execute_calendar(
+            {"action": "check_availability", "date": "2026-05-25"}, config
+        )
+        assert "'date', 'start_time', and 'end_time' are required" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_available(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            "DTSTART:20260525T100000\n"
+            "DTEND:20260525T110000\n"
+            "SUMMARY:Morning meeting\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        self._mock_feed(mock_urlopen, ical)
+
+        result = execute_calendar(
+            {
+                "action": "check_availability",
+                "date": "2026-05-25",
+                "start_time": "14:00",
+                "end_time": "15:00",
+            },
+            cfg,
+        )
+        assert "Available" in result
+        assert "free" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_conflict(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            "DTSTART:20260525T100000\n"
+            "DTEND:20260525T110000\n"
+            "SUMMARY:Blocking meeting\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+        self._mock_feed(mock_urlopen, ical)
+
+        result = execute_calendar(
+            {
+                "action": "check_availability",
+                "date": "2026-05-25",
+                "start_time": "10:30",
+                "end_time": "11:30",
+            },
+            cfg,
+        )
+        assert "Conflict" in result
+        assert "Blocking meeting" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_bad_date_format(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        self._mock_feed(mock_urlopen, "BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+
+        result = execute_calendar(
+            {
+                "action": "check_availability",
+                "date": "25/05/2026",
+                "start_time": "10:00",
+                "end_time": "11:00",
+            },
+            cfg,
+        )
+        assert "YYYY-MM-DD" in result
+
+    @patch("praxis.integrations.calendar.urllib.request.urlopen")
+    def test_end_before_start(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv(
+            "PRAXIS_CALENDAR_URL", "https://cal.example.com/feed.ics"
+        )
+        cfg = self._config_with_domains(config, {"cal.example.com"})
+        self._mock_feed(mock_urlopen, "BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+
+        result = execute_calendar(
+            {
+                "action": "check_availability",
+                "date": "2026-05-25",
+                "start_time": "15:00",
+                "end_time": "14:00",
+            },
+            cfg,
+        )
+        assert "end_time must be after start_time" in result
+
+
+# ---------- Calendar — propose_event ----------
+
+
+class TestCalendarPropose:
+    def test_missing_fields(self, config):
+        result = execute_calendar(
+            {"action": "propose_event", "title": "Meeting"}, config
+        )
+        assert "'title', 'date', 'start_time', and 'end_time' are required" in result
+
+    def test_propose_creates_ics(self, config):
+        result = execute_calendar(
+            {
+                "action": "propose_event",
+                "title": "Sprint planning",
+                "date": "2026-05-28",
+                "start_time": "09:00",
+                "end_time": "10:00",
+                "description": "Weekly sprint planning session",
+            },
+            config,
+        )
+        assert "Event proposal saved to" in result
+        assert "NOT been created" in result
+        assert "Sprint planning" in result
+        assert "09:00 - 10:00" in result
+
+        # Verify .ics file was created
+        events_dir = config.workspace_root / ".praxis" / "staging" / "events"
+        ics_files = list(events_dir.glob("*.ics"))
+        assert len(ics_files) == 1
+        content = ics_files[0].read_text()
+        assert "BEGIN:VCALENDAR" in content
+        assert "SUMMARY:Sprint planning" in content
+        assert "DESCRIPTION:Weekly sprint planning session" in content
+        assert "DTSTART:20260528T090000" in content
+
+    def test_propose_without_description(self, config):
+        result = execute_calendar(
+            {
+                "action": "propose_event",
+                "title": "Quick sync",
+                "date": "2026-05-28",
+                "start_time": "14:00",
+                "end_time": "14:30",
+            },
+            config,
+        )
+        assert "Event proposal saved to" in result
+        assert "NOT been created" in result
+
+        events_dir = config.workspace_root / ".praxis" / "staging" / "events"
+        ics_files = list(events_dir.glob("*.ics"))
+        content = ics_files[0].read_text()
+        assert "DESCRIPTION" not in content
+
+    def test_propose_bad_date_format(self, config):
+        result = execute_calendar(
+            {
+                "action": "propose_event",
+                "title": "Bad date",
+                "date": "May 28, 2026",
+                "start_time": "09:00",
+                "end_time": "10:00",
+            },
+            config,
+        )
+        assert "YYYY-MM-DD" in result
+
+    def test_propose_sanitizes_filename(self, config):
+        execute_calendar(
+            {
+                "action": "propose_event",
+                "title": "Has/Bad<Chars>!",
+                "date": "2026-05-28",
+                "start_time": "09:00",
+                "end_time": "10:00",
+            },
+            config,
+        )
+        events_dir = config.workspace_root / ".praxis" / "staging" / "events"
+        ics_files = list(events_dir.glob("*.ics"))
+        assert len(ics_files) == 1
+        assert "/" not in ics_files[0].name
+        assert "<" not in ics_files[0].name
+
+
+# ---------- Calendar — dispatch ----------
+
+
+class TestCalendarDispatch:
+    def test_unknown_action(self, config):
+        result = execute_calendar({"action": "bogus"}, config)
+        assert "unknown" in result
+
+
+# ---------- Calendar — secret redaction ----------
+
+
+class TestCalendarSecretRedaction:
+    def test_calendar_url_redacted(self, config, monkeypatch):
+        url = "https://cal.google.com/private-abc123/basic.ics"
+        monkeypatch.setenv("PRAXIS_CALENDAR_URL", url)
+        cfg = Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset({"cal.google.com"}),
+        )
+
+        from datetime import datetime, timedelta
+        tomorrow = datetime.now() + timedelta(days=1)
+        dt_str = tomorrow.strftime("%Y%m%dT%H%M%S")
+        ical = (
+            "BEGIN:VCALENDAR\n"
+            "BEGIN:VEVENT\n"
+            f"DTSTART:{dt_str}\n"
+            f"DTEND:{dt_str}\n"
+            f"SUMMARY:URL is {url}\n"
+            "END:VEVENT\n"
+            "END:VCALENDAR\n"
+        )
+
+        with patch("praxis.integrations.calendar.urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = ical.encode()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            result = execute_calendar({"action": "list_events"}, cfg)
+            assert url not in result
+            assert "[REDACTED]" in result
