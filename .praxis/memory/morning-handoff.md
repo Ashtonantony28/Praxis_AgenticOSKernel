@@ -1,7 +1,7 @@
-# Morning handoff — Phase 4 Wave 1 complete
+# Morning handoff — Phase 4 Wave 2 complete
 
 **Date:** 2026-05-25  
-**Status:** Phase 4 Wave 1 (workstation integrations) complete. 261 tests pass.
+**Status:** Phase 4 Wave 2 (web research integration) complete. 290 tests pass.
 
 ---
 
@@ -13,28 +13,29 @@
 
 ```
 praxis-system-prompt.md              # the spec (§0–§11)
-CLAUDE.md                            # project conventions — updated Phase 4
+CLAUDE.md                            # project conventions — updated Phase 4 Wave 2
 pyproject.toml                       # deps: anthropic, pyyaml, openai[local], pytest
 
 praxis/                              # the orchestrator
   __init__.py                        #   package marker, version
   __main__.py                        #   `python -m praxis` — interactive, --queue, --daemon, --stop, --status
-  config.py                          #   Config.from_env() — workspace/memory/hook from env
+  config.py                          #   Config.from_env() — workspace/memory/hook/allowed_domains from env
   convergence.py                     #   ConvergenceConfig.load() — multi-runtime routing (Phase D+I)
   subagents.py                       #   parse .claude/agents/*.md → SubagentDef
   hooks.py                           #   run_pretool_hook() — §5 enforcement
-  tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E, +GITHUB_TOKEN)
+  tools.py                           #   7 tool schemas + implementations + secret filtering (Phase E, +GITHUB_TOKEN, +WEB_SEARCH_API_KEY)
   orchestrator.py                    #   Orchestrator — merges integration tools into dispatch (Phase 4)
   queue.py                           #   TaskQueue — CRUD on tasks.jsonl (Phase J)
   checkpoint.py                      #   CheckpointStore — atomic writes via os.replace() (Phase J + fix)
   queue_runner.py                    #   Queue processing loop (Phase J)
   daemon.py                          #   Daemon start/stop/status (Phase J)
-  integrations/                      #   Workstation integrations (Phase 4 Wave 1) — NEW
+  integrations/                      #   Workstation integrations (Phase 4)
     __init__.py                      #     aggregates INTEGRATION_SCHEMAS + INTEGRATION_IMPLEMENTATIONS
     github.py                        #     GitHub via `gh` CLI — pr_list, pr_view, issue_list, issue_view, pr_diff
     codebase.py                      #     coverage report, radon complexity, pylint lint
     testrunner.py                    #     pytest run + run_failed
     dependencies.py                  #     pip outdated + pip-audit vulnerability scan
+    web.py                           #     Web search (Brave API) + fetch with domain allowlisting — NEW (Wave 2)
   runtime/                           #   Provider abstraction (Phase A + C + D + H + I)
     __init__.py                      #     exports Runtime, ClaudeCodeRuntime, LocalRuntime, OpenAICloudRuntime
     base.py                          #     Abstract Runtime (4 abstract methods)
@@ -43,7 +44,7 @@ praxis/                              # the orchestrator
     local.py                         #     Ollama/vLLM/llama.cpp — inherits OpenAIBaseRuntime
     cloud.py                         #     OpenAICloudRuntime — _resolve_model() added, retry 5/135s
 
-tests/                               # 261 tests, all pass, all mocked
+tests/                               # 290 tests, all pass, all mocked
   conftest.py
   test_config.py                     #   6 tests
   test_convergence.py                #   16 tests
@@ -59,16 +60,18 @@ tests/                               # 261 tests, all pass, all mocked
   test_checkpoint.py                 #   12 tests
   test_queue_runner.py               #   8 tests
   test_daemon.py                     #   10 tests
-  test_integrations.py               #   54 tests (NEW — Phase 4 Wave 1)
+  test_integrations.py               #   83 tests (54 Wave 1 + 29 Wave 2)
 
 .claude/agents/                      # 5 subagent definitions (builder, planner, scout, scribe, verifier)
-.claude/hooks/escalation-boundary.py # §5 hook
+.claude/hooks/escalation-boundary.py # §5 hook (unchanged — see staging patch below)
 .claude/settings.json                # hook wiring
 
 .praxis/memory/
   morning-handoff.md                 # this file
-  phase4-mcp-survey.md              # MCP server assessment (NEW)
-  phase4-wave1-plan.md              # integration layer design (NEW)
+  phase4-wave2-survey.md             # Web search API survey (NEW)
+  phase4-wave2-plan.md               # Web integration design (NEW)
+  phase4-mcp-survey.md               # MCP server assessment
+  phase4-wave1-plan.md               # Integration layer design
   pipeline-validation-report.md
   unattended-readiness.md
   phase-j-plan.md
@@ -76,6 +79,9 @@ tests/                               # 261 tests, all pass, all mocked
   h3-pipeline-report.md
   first-live-run.md
   phase-g-plan.md
+
+.praxis/staging/
+  escalation-boundary-patch.md       # Optional §5 hook patch for defense-in-depth (NEW)
 
 .praxis/queue/                       # Task queue directory (Phase J)
   tasks.jsonl
@@ -85,54 +91,51 @@ tests/                               # 261 tests, all pass, all mocked
 
 ---
 
-## 2. What Phase 4 Wave 1 built
+## 2. What Phase 4 Wave 2 built
 
-### Design decisions (from MCP survey)
-- No MCP servers needed — all four integrations use subprocess to existing CLI tools
-- Follows the same `subprocess.run` + `_subprocess_env()` + `_redact_secrets()` pattern as `tools.py`
-- Each integration is a standalone module with `SCHEMAS` and `IMPLEMENTATIONS` dicts
-- `praxis/integrations/__init__.py` aggregates all modules
-- `orchestrator.py` merges integration tools into core tool dispatch
+### WebResearch integration (`web.py`)
 
-### Integration 1: GitHub (`github.py`)
-- Tool: `GitHub` with actions: `pr_list`, `pr_view`, `issue_list`, `issue_view`, `pr_diff`
-- Wraps `gh` CLI with `--json` output for structured data
-- Auth via `GITHUB_TOKEN` env var (read by `gh` automatically)
-- Clear errors for: `gh` not installed, not authenticated, repo not found, timeout
+Single tool `WebResearch` with two actions:
+- **`search(query, n)`** — queries Brave Search API, returns numbered list of title/url/snippet
+- **`fetch(url, max_chars)`** — fetches a URL via `urllib.request`, strips HTML, returns clean text
 
-### Integration 2: Codebase Analysis (`codebase.py`)
-- Tool: `Analyze` with actions: `coverage`, `complexity`, `lint`
-- `coverage report --show-missing` for test coverage
-- `radon cc <path> -s -a` for cyclomatic complexity
-- `pylint <path> --disable=C,R --score=no` for errors/warnings only
-- Each sub-tool checked independently — clear install instructions if missing
+Key design decisions:
+- **Brave Search API** as primary search provider — 2,000 free queries/month, no credit card, good quality
+- **Zero external dependencies** — uses `urllib.request` + `html.parser` (stdlib only)
+- **Domain allowlisting** — every HTTP request checked against `config.allowed_domains` (from `PRAXIS_ALLOWED_DOMAINS` env var). Unlisted domains are blocked.
+- **API key via env var** — `PRAXIS_WEB_SEARCH_API_KEY`, added to `_redact_secrets()` for output filtering
+- **Content truncation** — fetch output capped at `max_chars` (default 4000) to prevent context blowout
+- **Non-text rejection** — only `text/html`, `text/plain`, `application/json` content types accepted
 
-### Integration 3: Test Runner (`testrunner.py`)
-- Tool: `TestRunner` with actions: `run`, `run_failed`
-- `pytest -v --tb=short -q` with optional path, marker (-m), keyword (-k)
-- `pytest --lf` for re-running last failures
+### §5 boundary decision
 
-### Integration 4: Dependencies (`dependencies.py`)
-- Tool: `Dependencies` with actions: `outdated`, `audit`
-- `pip list --outdated --format=json` for outdated packages
-- `pip-audit --format=json` for vulnerability scanning
+The §5 hook blocks `.claude/` edits (correctly). Rather than modifying the hook:
+- `WebResearch` is a custom Praxis integration tool — NOT in the hook's `NETWORK_TOOLS` set
+- Domain enforcement happens at the implementation level via `config.allowed_domains`
+- Same security guarantee: no HTTP request without domain in allowlist
+- Optional defense-in-depth hook patch written to `.praxis/staging/escalation-boundary-patch.md`
 
-### Orchestrator changes
-- `orchestrator.py`: imports `INTEGRATION_IMPLEMENTATIONS` and `get_integration_schemas()`
-- `run()`: passes `get_tool_schemas() + get_integration_schemas()` as tool_schemas
-- `run_subagent()`: includes integration schemas alongside core schemas for subagent tool list
-- `_execute_with_hook()`: checks `INTEGRATION_IMPLEMENTATIONS` as fallback after `TOOL_IMPLEMENTATIONS`
-- `tools.py`: added `GITHUB_TOKEN` to `_redact_secrets()`
+### Files changed
+
+| File | Change |
+|------|--------|
+| `praxis/integrations/web.py` | **NEW** — 239 lines, search + fetch + HTML stripping + domain validation |
+| `praxis/integrations/__init__.py` | Added web module import and aggregation |
+| `praxis/tools.py` | Added `PRAXIS_WEB_SEARCH_API_KEY` to `_redact_secrets()` |
+| `tests/test_integrations.py` | Added 29 tests (helpers, search, fetch, dispatch, redaction) |
+| `CLAUDE.md` | Added web integration docs + setup instructions |
+| `.praxis/staging/escalation-boundary-patch.md` | Optional hook patch for manual application |
 
 ---
 
 ## 3. What stayed the same
 
-- All 207 pre-existing tests pass unmodified
+- All 261 pre-existing tests pass unmodified
 - Interactive `python -m praxis "prompt"` works exactly as before
-- §5 hook enforcement unchanged
+- §5 hook enforcement unchanged (control plane protection intact)
 - Runtime, convergence, token propagation unchanged
 - Queue, checkpoint, daemon unchanged
+- Other integrations (GitHub, Analyze, TestRunner, Dependencies) unchanged
 
 ---
 
@@ -141,14 +144,20 @@ tests/                               # 261 tests, all pass, all mocked
 ```bash
 export PRAXIS_WORKSPACE_ROOT=$(pwd)
 
-# Full test suite (261 tests):
+# Full test suite (290 tests):
 python -m pytest tests/ -v
 
-# Integration tests only:
-python -m pytest tests/test_integrations.py -v
+# Web integration tests only:
+python -m pytest tests/test_integrations.py -v -k "WebResearch or web"
 
 # Quick import check:
-python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(list(INTEGRATION_SCHEMAS.keys()))"
+python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(sorted(INTEGRATION_SCHEMAS.keys()))"
+# → ['Analyze', 'Dependencies', 'GitHub', 'TestRunner', 'WebResearch']
+
+# Live test (requires API key + domain allowlist):
+export PRAXIS_WEB_SEARCH_API_KEY=BSA...
+export PRAXIS_ALLOWED_DOMAINS=api.search.brave.com,docs.python.org
+python -m praxis "search for Python asyncio documentation"
 ```
 
 ---
@@ -182,14 +191,14 @@ python -c "from praxis.integrations import INTEGRATION_SCHEMAS; print(list(INTEG
 | J-2 | Session continuity (CheckpointStore, staged resume) | 186 |
 | J-3 | Daemon entry point (start/stop/status + queue mode) | 203 |
 | pipeline-validation | Gemini 2.5 Flash e2e validation + fixes | 207 |
-| **4-W1** | **Workstation integrations: GitHub, Analyze, TestRunner, Dependencies** | **261** |
+| 4-W1 | Workstation integrations: GitHub, Analyze, TestRunner, Dependencies | 261 |
+| **4-W2** | **Web research: Brave Search API + fetch with domain allowlisting** | **290** |
 
 ---
 
-## 6. Wave 2 plan
+## 6. Wave 3 plan
 
-Phase 4 Wave 2 — deeper workstation awareness:
+Phase 4 Wave 3 — file management integration:
 - **File watcher** — detect workspace changes and trigger re-analysis
 - **Git integration** — branch state, uncommitted changes, recent commits as tool
 - **Project context** — auto-detect project type (Python/Node/Rust), load conventions
-- **Integration config** — optional `integrations:` section in `convergence.yaml` for per-tool enablement

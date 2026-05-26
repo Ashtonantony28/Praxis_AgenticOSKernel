@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -18,6 +20,13 @@ from praxis.integrations.github import execute_github, _run_gh
 from praxis.integrations.codebase import execute_analyze
 from praxis.integrations.testrunner import execute_testrunner
 from praxis.integrations.dependencies import execute_dependencies
+from praxis.integrations.web import (
+    execute_web_research,
+    _strip_html,
+    _extract_domain,
+    _check_domain,
+    BRAVE_API_DOMAIN,
+)
 
 
 @pytest.fixture
@@ -36,12 +45,12 @@ def config(tmp_path: Path) -> Config:
 class TestRegistry:
     def test_all_schemas_registered(self):
         assert set(INTEGRATION_SCHEMAS.keys()) == {
-            "GitHub", "Analyze", "TestRunner", "Dependencies"
+            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch"
         }
 
     def test_all_implementations_registered(self):
         assert set(INTEGRATION_IMPLEMENTATIONS.keys()) == {
-            "GitHub", "Analyze", "TestRunner", "Dependencies"
+            "GitHub", "Analyze", "TestRunner", "Dependencies", "WebResearch"
         }
 
     def test_schema_format(self):
@@ -54,7 +63,7 @@ class TestRegistry:
 
     def test_get_integration_schemas_all(self):
         schemas = get_integration_schemas()
-        assert len(schemas) == 4
+        assert len(schemas) == 5
 
     def test_get_integration_schemas_filtered(self):
         schemas = get_integration_schemas(["GitHub", "TestRunner"])
@@ -496,6 +505,331 @@ class TestOrchestratorIntegration:
 # ---------- Secret redaction ----------
 
 
+# ---------- Web research ----------
+
+
+class TestWebResearchHelpers:
+    def test_strip_html_basic(self):
+        html = "<h1>Title</h1><p>Hello <b>world</b></p>"
+        text = _strip_html(html)
+        assert "Title" in text
+        assert "Hello world" in text
+        assert "<" not in text
+
+    def test_strip_html_scripts_removed(self):
+        html = "<p>Before</p><script>alert('xss')</script><p>After</p>"
+        text = _strip_html(html)
+        assert "Before" in text
+        assert "After" in text
+        assert "alert" not in text
+
+    def test_strip_html_style_removed(self):
+        html = "<style>.foo{color:red}</style><p>Content</p>"
+        text = _strip_html(html)
+        assert "Content" in text
+        assert "color" not in text
+
+    def test_extract_domain(self):
+        assert _extract_domain("https://example.com/path") == "example.com"
+        assert _extract_domain("http://sub.example.com:8080/p") == "sub.example.com"
+        assert _extract_domain("not-a-url") == ""
+
+    def test_check_domain_allowed(self, config):
+        cfg = Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset({"example.com"}),
+        )
+        assert _check_domain("example.com", cfg) is None
+
+    def test_check_domain_blocked(self, config):
+        result = _check_domain("evil.com", config)
+        assert result is not None
+        assert "not in PRAXIS_ALLOWED_DOMAINS" in result
+
+    def test_check_domain_empty(self, config):
+        result = _check_domain("", config)
+        assert "could not extract domain" in result
+
+
+class TestWebResearchSearch:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    def test_missing_api_key(self, config, monkeypatch):
+        monkeypatch.delenv("PRAXIS_WEB_SEARCH_API_KEY", raising=False)
+        result = execute_web_research(
+            {"action": "search", "query": "test"}, config
+        )
+        assert "PRAXIS_WEB_SEARCH_API_KEY not set" in result
+        assert "brave.com" in result
+
+    def test_search_domain_not_allowed(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        result = execute_web_research(
+            {"action": "search", "query": "test"}, config
+        )
+        assert "not in PRAXIS_ALLOWED_DOMAINS" in result
+
+    def test_search_missing_query(self, config):
+        result = execute_web_research({"action": "search"}, config)
+        assert "'query' is required" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_success(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "web": {
+                "results": [
+                    {"title": "Python Docs", "url": "https://python.org", "description": "Official docs"},
+                    {"title": "PyPI", "url": "https://pypi.org", "description": "Package index"},
+                ]
+            }
+        }).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "search", "query": "python", "n": 2}, cfg
+        )
+        assert "Python Docs" in result
+        assert "python.org" in result
+        assert "PyPI" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_no_results(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"web": {"results": []}}).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "search", "query": "xyznonexistent"}, cfg
+        )
+        assert "No results found" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_http_error(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        err = urllib.error.HTTPError(
+            "https://api.search.brave.com/res/v1/web/search",
+            401, "Unauthorized", {}, None
+        )
+        mock_urlopen.side_effect = err
+
+        result = execute_web_research(
+            {"action": "search", "query": "test"}, cfg
+        )
+        assert "401" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_url_error(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        mock_urlopen.side_effect = urllib.error.URLError("DNS lookup failed")
+
+        result = execute_web_research(
+            {"action": "search", "query": "test"}, cfg
+        )
+        assert "could not reach" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_timeout(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        mock_urlopen.side_effect = TimeoutError()
+
+        result = execute_web_research(
+            {"action": "search", "query": "test"}, cfg
+        )
+        assert "timed out" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_search_n_clamped(self, mock_urlopen, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "test-key")
+        cfg = self._config_with_domains(config, {BRAVE_API_DOMAIN})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"web": {"results": []}}).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        # n=100 should be clamped to 20
+        execute_web_research(
+            {"action": "search", "query": "test", "n": 100}, cfg
+        )
+        call_args = mock_urlopen.call_args[0][0]
+        assert "count=20" in call_args.full_url
+
+
+class TestWebResearchFetch:
+    def _config_with_domains(self, config, domains):
+        return Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset(domains),
+        )
+
+    def test_fetch_domain_not_allowed(self, config):
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://evil.com/page"}, config
+        )
+        assert "not in PRAXIS_ALLOWED_DOMAINS" in result
+
+    def test_fetch_missing_url(self, config):
+        result = execute_web_research({"action": "fetch"}, config)
+        assert "'url' is required" in result
+
+    def test_fetch_bad_scheme(self, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+        result = execute_web_research(
+            {"action": "fetch", "url": "ftp://example.com/file"}, cfg
+        )
+        assert "http://" in result or "https://" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_html_success(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"docs.python.org"})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = (
+            b"<html><body><h1>Python</h1><p>Hello world</p></body></html>"
+        )
+        mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://docs.python.org/3/"}, cfg
+        )
+        assert "Fetched" in result
+        assert "Python" in result
+        assert "Hello world" in result
+        assert "<html>" not in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_plain_text(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"Just plain text content"
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/file.txt"}, cfg
+        )
+        assert "Just plain text content" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_json_content(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"api.example.com"})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"key": "value"}'
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://api.example.com/data"}, cfg
+        )
+        assert '"key": "value"' in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_non_text_rejected(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/png"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/img.png"}, cfg
+        )
+        assert "non-text content type" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_truncated(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = ("x" * 10000).encode()
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/big", "max_chars": 100},
+            cfg,
+        )
+        # Content should be truncated
+        fetched_line = result.split("\n")[0]
+        assert "100 chars" in fetched_line
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_http_error(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://example.com", 404, "Not Found", {}, None
+        )
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/missing"}, cfg
+        )
+        assert "404" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_url_error(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/"}, cfg
+        )
+        assert "could not fetch" in result
+
+    @patch("praxis.integrations.web.urllib.request.urlopen")
+    def test_fetch_timeout(self, mock_urlopen, config):
+        cfg = self._config_with_domains(config, {"example.com"})
+        mock_urlopen.side_effect = TimeoutError()
+        result = execute_web_research(
+            {"action": "fetch", "url": "https://example.com/"}, cfg
+        )
+        assert "timed out" in result
+
+
+class TestWebResearchDispatch:
+    def test_unknown_action(self, config):
+        result = execute_web_research({"action": "bogus"}, config)
+        assert "unknown" in result
+
+
 class TestSecretRedaction:
     def test_github_token_redacted(self, config, monkeypatch):
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret123")
@@ -509,3 +843,25 @@ class TestSecretRedaction:
                 result = execute_github({"action": "pr_list"}, config)
                 assert "ghp_secret123" not in result
                 assert "[REDACTED]" in result
+
+    def test_web_search_key_redacted(self, config, monkeypatch):
+        monkeypatch.setenv("PRAXIS_WEB_SEARCH_API_KEY", "BSAsecretkey123")
+        cfg = Config(
+            workspace_root=config.workspace_root,
+            memory_root=config.memory_root,
+            hook_path=config.hook_path,
+            allowed_domains=frozenset({"example.com"}),
+        )
+        with patch("praxis.integrations.web.urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"The key BSAsecretkey123 leaked"
+            mock_resp.headers = {"Content-Type": "text/plain"}
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            result = execute_web_research(
+                {"action": "fetch", "url": "https://example.com/page"}, cfg
+            )
+            assert "BSAsecretkey123" not in result
+            assert "[REDACTED]" in result

@@ -22,6 +22,7 @@ praxis/                          # Python orchestrator package
     codebase.py                  #   Coverage, complexity, lint via subprocess
     testrunner.py                #   pytest runner with parsed output
     dependencies.py              #   pip outdated + pip-audit vulnerability check
+    web.py                       #   Web search (Brave API) + page fetch with domain allowlisting
   queue.py                       # TaskQueue — CRUD on .praxis/queue/tasks.jsonl (Phase J)
   checkpoint.py                  # CheckpointStore — multi-stage task resumption (Phase J)
   queue_runner.py                # Queue processing loop — polls tasks, runs through orchestrator (Phase J)
@@ -37,7 +38,7 @@ praxis/                          # Python orchestrator package
 .claude/agents/                  # Subagent definitions (builder, planner, scout, scribe, verifier)
 .claude/hooks/escalation-boundary.py  # §5 hook — blocks out-of-workspace writes, network egress
 .claude/settings.json            # Claude Code hook wiring
-tests/                           # pytest suite (261 tests, all mocked — no real API calls)
+tests/                           # pytest suite (290 tests, all mocked — no real API calls)
 .praxis/memory/                  # Durable memory across sessions
 .praxis/queue/                   # Task queue directory (Phase J)
   tasks.jsonl                    #   One JSON task object per line
@@ -74,6 +75,10 @@ export PRAXIS_CLOUD_BASE_URL=https://api.openai.com/v1  # endpoint (default)
 export PRAXIS_CLOUD_MODEL=gpt-4o                  # model (default)
 pip install praxis[local]                         # installs openai package
 python -m praxis "your message"
+
+# Web research (Brave Search API — free tier, no credit card)
+export PRAXIS_WEB_SEARCH_API_KEY=BSA...           # from https://brave.com/search/api/
+export PRAXIS_ALLOWED_DOMAINS=api.search.brave.com,docs.python.org  # allowlisted domains
 
 # Unattended queue mode — process tasks from .praxis/queue/tasks.jsonl
 python -m praxis --queue
@@ -120,4 +125,6 @@ python -m pytest tests/ -v
   - `TestRunner` — wraps `pytest`. Actions: `run` (with optional path/marker/keyword), `run_failed` (re-run last failures).
   - `Dependencies` — wraps `pip` and `pip-audit`. Actions: `outdated` (JSON list of outdated packages), `audit` (vulnerability scan).
   
-  All integrations use `subprocess.run` with `_subprocess_env()` for token propagation and `_redact_secrets()` for output filtering (including `GITHUB_TOKEN`). Each fails loudly with install instructions if the required CLI tool is missing. Integration tools are registered in the orchestrator alongside core tools — subagents can call them if their tool list includes the tool name. No credentials stored in code or logs.
+  - `WebResearch` — web search and page fetch via Brave Search API + `urllib`. Actions: `search` (query, n), `fetch` (url, max_chars). Uses `urllib.request` (stdlib, no external deps). HTML stripped via `html.parser`. Fetch content truncated to `max_chars` (default 4000). Auth via `PRAXIS_WEB_SEARCH_API_KEY` env var. Domain enforcement: every HTTP request (both search API and fetch URLs) is checked against `config.allowed_domains` from `PRAXIS_ALLOWED_DOMAINS` — requests to unlisted domains are blocked. API key added to `_redact_secrets()`.
+  
+  All integrations use `subprocess.run` (or `urllib.request` for web) with `_subprocess_env()` for token propagation and `_redact_secrets()` for output filtering (including `GITHUB_TOKEN`, `PRAXIS_WEB_SEARCH_API_KEY`). Each fails loudly with install/config instructions if the required CLI tool or API key is missing. Integration tools are registered in the orchestrator alongside core tools — subagents can call them if their tool list includes the tool name. No credentials stored in code or logs.
