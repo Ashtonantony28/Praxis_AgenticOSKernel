@@ -417,3 +417,23 @@ python -m pytest tests/ -v
 - Step 9 (wiki seed) copies `*.md` / `*.txt` files to `wiki/raw/` using `shutil.copy2`.
 - `.gitignore` check in step 10: warns if `.env` is not listed, prints remediation command.
 - `§5 analysis:` wizard writes only to workspace .env (inside WORKSPACE_ROOT) — no §5 boundary crossed. All credential values go directly to .env; never printed, logged, or echoed (getpass ensures this).
+
+## Config wizard conventions (Cycle C)
+- `praxis/config_wizard.py` implements `run_config_wizard(workspace_root, *, env_file, _input, _env_mode)`.
+- Reads current settings from: convergence.yaml `agents:` section (per-subagent models), `.env` (runtime/max_turns/cost_cap/effort_preset), hardcoded defaults.
+- Main menu: 10 items — 5 per-agent model choices, max_turns, cost_cap, runtime, effort preset, Done.
+- Model choices: claude-opus-4-7 (strongest), claude-sonnet-4-6 (balanced), claude-haiku-4-5 (fastest), gemini-2.5-flash, llama3.1:8b, custom string.
+- Runtime choices: claude (OAuth), cloud (OpenAI-compatible), local (Ollama/vLLM).
+- **Effort presets:** six named levels that set all agent models + max_turns + cost_cap atomically:
+  - Minimal: Haiku everywhere, 20 turns, $1.00 cap
+  - Low: Haiku scouts/reviewer/scribe, Sonnet orchestrator/builder, 40 turns, $2.00 cap
+  - Medium: Sonnet everywhere, 80 turns, $5.00 cap
+  - High: Sonnet scouts/reviewer/scribe, Opus orchestrator/builder, 120 turns, $10.00 cap
+  - Max: Opus everywhere, 200 turns, $20.00 cap
+  - Custom: opens normal per-item menu (no atomic change)
+  Preset shows a diff of what will change before confirmation.
+- **Writes:**
+  - `.env` — `PRAXIS_RUNTIME`, `PRAXIS_MAX_SESSION_COST`, `PRAXIS_MAX_TURNS`, `PRAXIS_EFFORT_PRESET` via `_update_env()` (merge-and-update: replaces existing keys in-place, appends new — never duplicates, never drops unrelated keys).
+  - `convergence.yaml` — `agents:` section only. Uses regex-replace to update existing section or append if absent. Never touches `runtimes:` or `task_types:` sections.
+- CLI: `python -m praxis --config` (no arguments needed). Works alongside `--setup` (setup for first-run, config for ongoing changes).
+- `§5 analysis:` all writes inside WORKSPACE_ROOT ✓; no egress ✓; never touches `.claude/hooks/` or `.claude/settings.json` ✓.

@@ -60,6 +60,13 @@ python -m praxis --setup
 
 The wizard takes you through runtime selection, credential entry (all hidden with getpass), and optional integrations (Slack, GitHub, web search, email). It writes your `.env` file and can schedule a morning briefing in under 5 minutes.
 
+```bash
+# Change model/effort settings at any time (no file editing required)
+python -m praxis --config
+```
+
+The config wizard lets you adjust model assignments per subagent (orchestrator, builder, reviewer, scout, scribe), max turns, cost cap, and runtime. It includes named effort presets (Minimal → Max) that set a coordinated combination in one step. Changes are written to `.env` and `convergence.yaml` — no manual file editing required.
+
 After setup:
 ```bash
 source .venv/bin/activate

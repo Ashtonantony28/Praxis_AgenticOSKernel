@@ -461,6 +461,8 @@ def _parse_mode(argv: list[str]) -> str:
         return "wiki_link_issue"
     if "--setup" in argv:
         return "setup"
+    if "--config" in argv:
+        return "config"
     return "interactive"
 
 
@@ -762,6 +764,15 @@ def main() -> None:
                 _mode = "overwrite"
 
             run_wizard(workspace_root, env_file=env_file, _env_mode=_mode)
+
+        elif mode == "config":
+            import os as _os
+            from pathlib import Path as _Path
+            from .config_wizard import run_config_wizard
+
+            workspace_root = _Path(_os.environ.get("PRAXIS_WORKSPACE_ROOT", _os.getcwd()))
+            env_file = workspace_root / ".env"
+            run_config_wizard(workspace_root, env_file=env_file)
 
     except KeyboardInterrupt:
         sys.stderr.write("\n[praxis] interrupted.\n")
