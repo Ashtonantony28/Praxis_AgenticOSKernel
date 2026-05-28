@@ -1,8 +1,19 @@
-# Praxis
+# Praxis-Kernel
 
-A governed agentic OS kernel. Not a coding assistant — an orchestrator that perceives, plans, acts, verifies, and remembers on your behalf, with a security boundary that cannot be bypassed.
+A governed agentic OS kernel that works overnight and stages 
+external writes for your morning approval.
 
-Praxis turns a Claude (or any OpenAI-compatible) model into a disciplined system that runs inside a sandbox it cannot escape. Every tool call passes through an escalation boundary hook. Writes outside the workspace are blocked. Network egress is blocked. The model must escalate to you — the human — for anything beyond its permitted scope.
+**Run it free** — works on local Ollama, free Gemini 2.5 Flash, 
+or any OpenAI-compatible endpoint. No per-token billing required.
+
+**Trust it** — every write to Notion, Linear, email, or calendar 
+is staged locally. You run `python -m praxis --approve` in the 
+morning to review and execute. There is no code path that acts 
+on your behalf without you.
+
+**Verify it** — 674 tests, a §5 security hook that intercepts 
+every tool call before execution, and a financial circuit breaker 
+that halts the system if session costs exceed your configured cap.
 
 ## Why Praxis
 
@@ -103,8 +114,8 @@ python -m praxis "hello"
 
 | Agent | Role | Tools |
 |-------|------|-------|
-| **Scout** | Read-only investigation. Finds files, greps symbols, summarizes. | Read, Grep, Glob, Bash |
-| **Planner** | Designs implementation plans. Read-only — never executes. | Read, Grep, Glob, Bash |
+| **Scout** | Read-only investigation. Finds files, greps symbols, summarizes. | Read, Grep, Glob |
+| **Planner** | Designs implementation plans. Read-only — never executes. | Read, Grep, Glob |
 | **Builder** | Executes approved plans. Edits files, runs commands. | Read, Edit, Write, Bash, Grep, Glob |
 | **Verifier** | Independently checks Builder output. Runs tests, probes health. | Read, Grep, Glob, Bash |
 | **Scribe** | Maintains durable memory. Updates records across sessions. | Read, Edit, Write, Grep, Glob |
@@ -148,6 +159,126 @@ Install analysis tools: `pip install praxis[analyze]`
 
 See `.env.example` for full configuration reference.
 
+## Phase S — Slack Bridge
+
+Praxis can receive commands from Slack and send structured notifications back.
+
+### Outbound notifications (autonomous)
+
+```bash
+export PRAXIS_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+export PRAXIS_ALLOWED_DOMAINS=...,hooks.slack.com
+pip install praxis[slack]
+python -m praxis "notify the team that the nightly run completed"
+```
+
+Praxis calls the `Slack` tool with `action: notify` — this POSTs to your incoming webhook autonomously. It is Praxis-to-user communication, not user-attributed, so the §5 boundary permits it.
+
+### User-attributed messages (write-escalate)
+
+`stage_message` saves the composed message to `.praxis/staging/slack/messages/{id}.json` for your review. There is no `send` action — the escalation is structural.
+
+### Approval workflows
+
+`post_approval_request` stages an approval record and sends a notification with a Slack button. When you click Approve or Reject in Slack, the listener updates `.praxis/staging/slack/approvals/{id}.json`. Praxis polls with `get_approval` to see the result.
+
+### Inbound commands (socket mode)
+
+```bash
+export PRAXIS_SLACK_BOT_TOKEN=xoxb-...
+export PRAXIS_SLACK_APP_TOKEN=xapp-...
+python -m praxis --slack-listen
+```
+
+The socket listener receives DMs and slash commands, wraps them as tasks in `.praxis/queue/`, and processes them through the queue runner. SIGTERM-safe — finishes the current event before exiting.
+
+## Phase M — MCP Gateway
+
+Praxis exposes all its tools to any MCP (Model Context Protocol) client over HTTP/SSE.
+
+```bash
+pip install praxis[mcp]
+python -m praxis --mcp          # starts on http://127.0.0.1:8765/sse
+```
+
+**What's exposed:**
+- All core tools (Bash, Read, Edit, Write, Grep, Glob, Agent) as MCP `tools/list` entries
+- All integration tools (GitHub, Analyze, TestRunner, Dependencies, WebResearch, FileManager, Email, Calendar, Wiki, Slack, Playwright, Notion, Linear) as MCP tools
+- `wiki/pages/*.md` as MCP Resources at `wiki://pages/{slug}`
+
+**§5 boundary at MCP:** Every tool call passes through the same `escalation-boundary.py` hook as all other Praxis tool calls. Out-of-workspace writes, network egress to unlisted domains, and other §5 violations are blocked before the tool implementation runs.
+
+**Transport:** HTTP/SSE. Compatible with Claude Desktop and any remote MCP client. Port configurable via `PRAXIS_MCP_PORT` (default 8765).
+
+## Phase T — Telemetry
+
+Every tool call in `ClaudeCodeRuntime` and `OpenAIBaseRuntime` is logged with:
+- Tool name, latency (ms), hook result (allowed/blocked), caller runtime
+- Events written to `.praxis/logs/telemetry.jsonl` (append-only JSONL, ring buffer of 1000 events in memory)
+
+**Prometheus metrics** are available on the MCP server at `GET /metrics`:
+
+```
+praxis_tool_calls_total              # total tool calls
+praxis_hook_blocks_total             # §5 blocks
+praxis_circuit_breaker_trips_total   # cost breaker trips
+praxis_tool_latency_seconds          # summary (p50/p95/p99)
+```
+
+Access: `http://127.0.0.1:8765/metrics` (when `--mcp` is running). Falls back gracefully if telemetry is unavailable.
+
+## Phase X — External Integrations
+
+### Browser automation (Playwright)
+
+```bash
+pip install praxis[playwright]
+playwright install chromium
+
+# Add target domain to allowlist
+export PRAXIS_ALLOWED_DOMAINS=example.com
+
+# Playwright fetch and screenshot are available as Praxis tools
+python -m praxis "fetch https://example.com and summarize"
+```
+
+Playwright runs in an **isolated subprocess** — no local browser profile, no stored session cookies, no credentials exposed to the browser process.
+
+### Notion + Linear (write-escalate pattern)
+
+```bash
+# Set credentials
+export PRAXIS_NOTION_TOKEN=secret_...
+export PRAXIS_LINEAR_API_KEY=lin_api_...
+
+# Add API domains
+export PRAXIS_ALLOWED_DOMAINS=api.notion.com,api.linear.app
+
+# Read operations happen autonomously
+python -m praxis "list my Linear issues"
+
+# Write operations are STAGED — never executed autonomously
+python -m praxis "create a Linear issue for the Playwright tests"
+# → Staged to .praxis/staging/external_actions.jsonl
+
+# Review and approve staged actions
+python -m praxis --approve
+
+# Show all pending staged items without interactive prompts
+python -m praxis --list-staged
+```
+
+Write actions (create_page, create_issue, update_issue, etc.) follow the same **read-safe / write-escalate** pattern as email and calendar: they are staged to `.praxis/staging/external_actions.jsonl` for human review, never executed autonomously.
+
+### Cost circuit breaker
+
+```bash
+# Cap per-session estimated API cost (default $2.00)
+export PRAXIS_MAX_SESSION_COST=5.00
+
+# On breach: dumps trace to .praxis/logs/cost-circuit-break-{timestamp}.json and exits 3
+```
+
 ## Queue and Daemon
 
 Praxis can run unattended, processing tasks from a queue:
@@ -166,7 +297,7 @@ Multi-stage tasks are checkpointed — if the daemon crashes, it resumes from th
 
 ```bash
 pip install praxis[dev]
-python -m pytest tests/ -v          # 388 tests, all mocked
+python -m pytest tests/ -v          # 578 tests, all mocked
 ```
 
 No real API calls. All tests use a mock client from `tests/conftest.py`.
